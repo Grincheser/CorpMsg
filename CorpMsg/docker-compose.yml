@@ -1,0 +1,105 @@
+﻿version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"  # HTTP порт
+      - "8081:8081"  # HTTPS порт (если нужен)
+    depends_on:
+      - db
+      - minio
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=corpmsg;Username=postgres;Password=ravenruslan230
+      - Minio__Endpoint=minio:9000
+      - Minio__AccessKey=Grinch
+      - Minio__SecretKey=ravenruslan230
+      - Minio__UseSSL=false
+      - Minio__BucketNames__CompanyAvatars=company-avatars
+      - Minio__BucketNames__ChatAvatars=chat-avatars
+      - Minio__BucketNames__MessageMedia=message-media
+      - Jwt__Key=super-secret-key-for-corpmsg-minimum-32-characters
+      - Jwt__Issuer=CorpMsg
+      - Jwt__Audience=CorpMsgClients
+      - Jwt__ExpiryInHours=24
+      - Logging__LogLevel__Default=Information
+      - Logging__LogLevel__Microsoft.AspNetCore=Warning
+    restart: unless-stopped
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: corpmsg
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ravenruslan230
+    ports:
+      - "5433:5432"  # Маппинг на хост для доступа снаружи (опционально)
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d corpmsg"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: Grinch
+      MINIO_ROOT_PASSWORD: ravenruslan230
+    ports:
+      - "9000:9000"   # API порт
+      - "9001:9001"   # Web консоль
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Опционально: pgAdmin для управления PostgreSQL
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@corpmsg.local
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    networks:
+      - app-network
+    restart: unless-stopped
+    profiles:
+      - dev  # Только для разработки
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
+  minio-data:
+    driver: local
