@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Minio;
 using System.Text;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -120,15 +121,37 @@ builder.Services.AddSingleton<IMinioClient>(sp =>
 // Регистрация сервисов
 builder.Services.AddScoped<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddScoped<IBannedWordsService, BannedWordsService>();
-builder.Services.AddScoped<IMinioService, MinioService>();
+
+// Добавьте rate limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
+        httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.Identity?.Name ??
+                          httpContext.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            factory: partition => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 100,
+                QueueLimit = 0,
+                Window = TimeSpan.FromMinutes(1)
+            }));
+});
+
+// Регистрация сервиса
+builder.Services.AddScoped<IFileStorageService, FileStorageService>();
 
 var app = builder.Build();
 
 // Настройка pipeline
-if (app.Environment.IsDevelopment())
+if (builder.Environment.IsDevelopment() || true) // Временно для тестирования
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
+        c.RoutePrefix = "swagger"; // Swagger будет доступен по /swagger
+    });
 }
 
 app.UseHttpsRedirection();
@@ -136,6 +159,19 @@ app.UseCors("AllowReactApp");
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.UseRateLimiter();
+// Настройка Security Headers
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Add("X-Frame-Options", "DENY");
+    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+    context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+    context.Response.Headers.Add("Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data:; media-src 'self';");
+    await next();
+});
 
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");

@@ -22,11 +22,11 @@ namespace CorpMsg.AppData
         public DbSet<Notification> Notifications { get; set; } = null!;
         public DbSet<UserStatus> UserStatuses { get; set; } = null!;
         public DbSet<AuditLog> AuditLogs { get; set; } = null!;
-
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
 
+     
             // Составной первичный ключ для ChatMember
             modelBuilder.Entity<ChatMember>()
                 .HasKey(cm => new { cm.ChatId, cm.UserId });

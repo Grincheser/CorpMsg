@@ -92,6 +92,11 @@ namespace CorpMsg.Models
         public bool IsFrozen { get; set; } = false; // Заморозка аккаунта (декрет, увольнение)
 
         // Компания пользователя
+        [MaxLength(500)]
+        public string? AvatarUrl { get; set; }
+
+        public DateTime? AvatarUpdatedAt { get; set; }
+
         [Required]
         public Guid CompanyId { get; set; }
         [ForeignKey(nameof(CompanyId))]
@@ -182,9 +187,8 @@ namespace CorpMsg.Models
 
         public bool IsUserCreated { get; set; } = false; // true - если создан обычным сотрудником
 
-        // Отдел-владелец чата (обязательный)
         [MaxLength(500)]
-        public string? AvatarUrl { get; set; } // Ссылка на аватар чата в MinIO
+        public string? AvatarUrl { get; set; }
 
         public DateTime? AvatarUpdatedAt { get; set; }
 
