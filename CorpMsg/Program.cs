@@ -110,11 +110,13 @@ builder.Services.AddSingleton<IMinioClient>(sp =>
     var accessKey = configuration["Minio:AccessKey"] ?? "minioadmin";
     var secretKey = configuration["Minio:SecretKey"] ?? "minioadmin";
     var useSsl = bool.Parse(configuration["Minio:UseSsl"] ?? "false");
+    var region = configuration["Minio:Region"] ?? "us-east-1";
 
     return new MinioClient()
         .WithEndpoint(endpoint)
         .WithCredentials(accessKey, secretKey)
         .WithSSL(useSsl)
+        .WithRegion(region)
         .Build();
 });
 

@@ -166,6 +166,62 @@ namespace CorpMsg.Controllers
             }
         }
 
+
+        /// <summary>
+        /// Редактирование чата
+        /// </summary>
+        [HttpPut("{id}")]
+        public async Task<IActionResult> UpdateChat(Guid id, UpdateChatRequest request)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+
+            var chat = await _context.Chats
+                .FirstOrDefaultAsync(c => c.Id == id && !c.IsDeleted);
+
+            if (chat == null)
+                return NotFound();
+
+            // Проверка прав (админ, руководитель отдела, модератор)
+            if (!await CanManageChat(id, userId))
+                return Forbid();
+
+            chat.Name = request.Name;
+            chat.Description = request.Description;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { chat.Id, chat.Name, chat.Description });
+        }
+        public class UpdateChatRequest
+        {
+            public string Name { get; set; } = string.Empty;
+            public string? Description { get; set; }
+        }
+        /// <summary>
+        /// Удаление чата
+        /// </summary>
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteChat(Guid id)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+
+            var chat = await _context.Chats
+                .FirstOrDefaultAsync(c => c.Id == id && !c.IsDeleted);
+
+            if (chat == null)
+                return NotFound();
+
+            // Проверка прав (только админ или создатель)
+            var user = await _context.Users.FindAsync(userId);
+            if (!user.IsGlobalAdmin && chat.CreatedByUserId != userId)
+                return Forbid();
+
+            chat.IsDeleted = true;
+            chat.DeletedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Чат удален" });
+        }
+
         /// <summary>
         /// Получение списка чатов пользователя
         /// </summary>
@@ -255,7 +311,10 @@ namespace CorpMsg.Controllers
         [HttpPost("{id}/members")]
         public async Task<IActionResult> AddMembers(Guid id, AddMembersRequest request)
         {
-            if (!await CanManageChat(id))
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+
+            // Проверка прав - передаем userId
+            if (!await CanManageChat(id, userId))
                 return Forbid();
 
             var chat = await _context.Chats
@@ -265,22 +324,21 @@ namespace CorpMsg.Controllers
             if (chat == null)
                 return NotFound();
 
-            foreach (var userId in request.UserIds)
+            foreach (var memberId in request.UserIds)
             {
-                if (!chat.Members.Any(m => m.UserId == userId))
+                if (!chat.Members.Any(m => m.UserId == memberId))
                 {
                     _context.ChatMembers.Add(new ChatMember
                     {
                         ChatId = id,
-                        UserId = userId,
+                        UserId = memberId,
                         Role = ChatMemberRole.Member,
                         JoinedAt = DateTime.UtcNow
                     });
 
-                    // Уведомление
                     _context.Notifications.Add(new Notification
                     {
-                        UserId = userId,
+                        UserId = memberId,
                         Title = "Новый чат",
                         Content = $"Вас добавили в чат {chat.Name}",
                         Type = NotificationType.AddedToChat,
@@ -293,17 +351,21 @@ namespace CorpMsg.Controllers
             return Ok();
         }
 
+
         /// <summary>
         /// Изменение роли участника
         /// </summary>
         [HttpPut("{id}/members/{userId}/role")]
-        public async Task<IActionResult> UpdateMemberRole(Guid id, Guid userId, UpdateRoleRequest request)
+        public async Task<IActionResult> UpdateMemberRole(Guid id, Guid targetUserId, UpdateRoleRequest request)
         {
-            if (!await CanManageChat(id))
+            var currentUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+
+            // Проверка прав - передаем currentUserId
+            if (!await CanManageChat(id, currentUserId))
                 return Forbid();
 
             var membership = await _context.ChatMembers
-                .FirstOrDefaultAsync(cm => cm.ChatId == id && cm.UserId == userId);
+                .FirstOrDefaultAsync(cm => cm.ChatId == id && cm.UserId == targetUserId);
 
             if (membership == null)
                 return NotFound();
@@ -318,13 +380,16 @@ namespace CorpMsg.Controllers
         /// Удаление участника из чата
         /// </summary>
         [HttpDelete("{id}/members/{userId}")]
-        public async Task<IActionResult> RemoveMember(Guid id, Guid userId)
+        public async Task<IActionResult> RemoveMember(Guid id, Guid targetUserId)
         {
-            if (!await CanManageChat(id))
+            var currentUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+
+            // Проверка прав - передаем currentUserId
+            if (!await CanManageChat(id, currentUserId))
                 return Forbid();
 
             var membership = await _context.ChatMembers
-                .FirstOrDefaultAsync(cm => cm.ChatId == id && cm.UserId == userId);
+                .FirstOrDefaultAsync(cm => cm.ChatId == id && cm.UserId == targetUserId);
 
             if (membership == null)
                 return NotFound();
@@ -373,9 +438,8 @@ namespace CorpMsg.Controllers
                 .AnyAsync(cm => cm.ChatId == chatId && cm.UserId == userId);
         }
 
-        private async Task<bool> CanManageChat(Guid chatId)
+        private async Task<bool> CanManageChat(Guid chatId, Guid userId)
         {
-            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
             var user = await _context.Users.FindAsync(userId);
 
             if (user.IsGlobalAdmin)
@@ -391,7 +455,6 @@ namespace CorpMsg.Controllers
             return membership.Role == ChatMemberRole.Moderator ||
                    membership.Role == ChatMemberRole.Head;
         }
-
         private async Task<bool> IsDepartmentHead(Guid userId, Guid departmentId)
         {
             return await _context.Departments
@@ -491,7 +554,6 @@ namespace CorpMsg.Controllers
         public List<ChatMemberResponse> Members { get; set; } = new();
         public List<string> ParticipatingDepartments { get; set; } = new();
     }
-
     public class ChatMemberResponse
     {
         public Guid UserId { get; set; }

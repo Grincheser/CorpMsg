@@ -1,6 +1,7 @@
 ﻿using CorpMsg.AppData;
 using CorpMsg.Hubs;
 using CorpMsg.Models;
+using CorpMsg.Service;
 using CorpMsg.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -19,22 +20,25 @@ namespace CorpMsg.Controllers
         private readonly ApplicationDbContext _context;
         private readonly IHubContext<ChatHub> _hubContext;
         private readonly IBannedWordsService _bannedWordsService;
+        private readonly IFileStorageService _fileStorageService; // Добавляем сервис для файлов
 
         public MessageController(
             ApplicationDbContext context,
             IHubContext<ChatHub> hubContext,
-            IBannedWordsService bannedWordsService)
+            IBannedWordsService bannedWordsService,
+            IFileStorageService fileStorageService) // Добавляем в конструктор
         {
             _context = context;
             _hubContext = hubContext;
             _bannedWordsService = bannedWordsService;
+            _fileStorageService = fileStorageService;
         }
 
         /// <summary>
-        /// Отправка сообщения
+        /// Отправка сообщения (с поддержкой файлов)
         /// </summary>
         [HttpPost]
-        public async Task<ActionResult<MessageResponse>> SendMessage(SendMessageRequest request)
+        public async Task<ActionResult<MessageResponse>> SendMessage([FromForm] SendMessageRequest request)
         {
             var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
             var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
@@ -48,20 +52,57 @@ namespace CorpMsg.Controllers
             if (user.IsFrozen)
                 return BadRequest("Аккаунт заморожен. Невозможно отправить сообщение");
 
-            // Проверка на запрещенные слова
-            var bannedWords = await _context.BannedWords
-                .Where(b => b.CompanyId == companyId)
-                .Select(b => b.Word)
-                .ToListAsync();
+            // Обработка файла, если есть
+            string? mediaUrl = null;
+            string? fileName = null;
+            long? fileSize = null;
+            bool isMedia = false;
+            MessageType messageType = MessageType.Text;
 
-            var filteredContent = _bannedWordsService.FilterContent(request.Content, bannedWords);
-            var hasBannedWords = filteredContent != request.Content;
+            if (request.File != null && request.File.Length > 0)
+            {
+                // Загружаем файл в MinIO
+                var uploadResult = await _fileStorageService.UploadFileAsync(
+                    request.File,
+                    request.ChatId,
+                    userId,
+                    "messages"); // Тип "messages" для медиа в сообщениях
+
+                if (!uploadResult.IsSuccess)
+                {
+                    return StatusCode(uploadResult.Error.StatusCode, uploadResult.Error);
+                }
+
+                mediaUrl = uploadResult.Data.FileUrl;
+                fileName = uploadResult.Data.FileName;
+                fileSize = uploadResult.Data.FileSize;
+                isMedia = true;
+                messageType = MessageType.Media;
+            }
+
+            // Проверка на запрещенные слова (только для текстовых сообщений)
+            string filteredContent = request.Content;
+            bool hasBannedWords = false;
+
+            if (!string.IsNullOrEmpty(request.Content))
+            {
+                var bannedWords = await _context.BannedWords
+                    .Where(b => b.CompanyId == companyId)
+                    .Select(b => b.Word)
+                    .ToListAsync();
+
+                filteredContent = _bannedWordsService.FilterContent(request.Content, bannedWords);
+                hasBannedWords = filteredContent != request.Content;
+            }
 
             var message = new Message
             {
                 Content = filteredContent,
-                Type = request.Type,
-                MediaUrl = request.MediaUrl,
+                Type = messageType,
+                MediaUrl = mediaUrl,
+                MediaFileName = fileName,
+                MediaFileSize = fileSize,
+                IsMedia = isMedia,
                 ChatId = request.ChatId,
                 SenderId = userId,
                 CreatedAt = DateTime.UtcNow
@@ -70,7 +111,7 @@ namespace CorpMsg.Controllers
             _context.Messages.Add(message);
             await _context.SaveChangesAsync();
 
-            // Если были запрещенные слова, логируем - ИСПРАВЛЕНО
+            // Если были запрещенные слова, логируем
             if (hasBannedWords)
             {
                 _context.AuditLogs.Add(new AuditLog
@@ -80,8 +121,8 @@ namespace CorpMsg.Controllers
                     Action = AuditAction.Create,
                     EntityType = "MessageWithBannedWords",
                     EntityId = message.Id.ToString(),
-                    OldValue = JsonSerializer.Serialize(new { Content = request.Content }), // Обернуть в JSON
-                    NewValue = JsonSerializer.Serialize(new { Content = filteredContent }) // Обернуть в JSON
+                    OldValue = JsonSerializer.Serialize(new { Content = request.Content }),
+                    NewValue = JsonSerializer.Serialize(new { Content = filteredContent })
                 });
                 await _context.SaveChangesAsync();
             }
@@ -173,7 +214,7 @@ namespace CorpMsg.Controllers
             message.IsEdited = true;
             await _context.SaveChangesAsync();
 
-            // Логируем редактирование - важно: сериализуем в JSON
+            // Логируем редактирование
             _context.AuditLogs.Add(new AuditLog
             {
                 UserId = userId,
@@ -181,8 +222,8 @@ namespace CorpMsg.Controllers
                 Action = AuditAction.Update,
                 EntityType = "Message",
                 EntityId = message.Id.ToString(),
-                OldValue = JsonSerializer.Serialize(new { Content = oldContent }), // Обернуть в JSON объект
-                NewValue = JsonSerializer.Serialize(new { Content = filteredContent }) // Обернуть в JSON объект
+                OldValue = JsonSerializer.Serialize(new { Content = oldContent }),
+                NewValue = JsonSerializer.Serialize(new { Content = filteredContent })
             });
             await _context.SaveChangesAsync();
 
@@ -212,6 +253,17 @@ namespace CorpMsg.Controllers
             // Проверка прав на удаление
             if (!await CanDeleteMessage(message, userId))
                 return Forbid();
+
+            // Удаляем файл из MinIO, если это медиа
+            if (message.IsMedia && !string.IsNullOrEmpty(message.MediaUrl))
+            {
+                var deleteResult = await _fileStorageService.DeleteFileAsync(message.MediaUrl);
+                if (!deleteResult.IsSuccess)
+                {
+                    // Логируем, но не прерываем удаление сообщения
+                    Console.WriteLine($"Failed to delete file: {message.MediaUrl}");
+                }
+            }
 
             message.IsDeleted = true;
             await _context.SaveChangesAsync();
@@ -247,6 +299,9 @@ namespace CorpMsg.Controllers
                 Content = originalMessage.Content,
                 Type = originalMessage.Type,
                 MediaUrl = originalMessage.MediaUrl,
+                MediaFileName = originalMessage.MediaFileName,
+                MediaFileSize = originalMessage.MediaFileSize,
+                IsMedia = originalMessage.IsMedia,
                 ChatId = request.TargetChatId,
                 SenderId = userId,
                 ForwardedFromMessageId = originalMessage.Id,
@@ -301,6 +356,8 @@ namespace CorpMsg.Controllers
             return Ok(messages.Select(MapToResponse));
         }
 
+        // ... (остальные вспомогательные методы остаются без изменений)
+
         private async Task<bool> CanAccessChat(Guid chatId, Guid userId)
         {
             var user = await _context.Users.FindAsync(userId);
@@ -308,7 +365,6 @@ namespace CorpMsg.Controllers
             if (user.IsGlobalAdmin)
                 return true;
 
-            // Проверка членства в чате
             return await _context.ChatMembers
                 .AnyAsync(cm => cm.ChatId == chatId && cm.UserId == userId);
         }
@@ -320,14 +376,12 @@ namespace CorpMsg.Controllers
             if (user.IsGlobalAdmin)
                 return true;
 
-            // Руководитель отдела может видеть историю всех чатов отдела
             var chat = await _context.Chats
                 .FirstOrDefaultAsync(c => c.Id == chatId);
 
             if (chat != null && await IsDepartmentHead(userId, chat.DepartmentId))
                 return true;
 
-            // Обычный пользователь должен быть участником
             return await _context.ChatMembers
                 .AnyAsync(cm => cm.ChatId == chatId && cm.UserId == userId);
         }
@@ -336,11 +390,9 @@ namespace CorpMsg.Controllers
         {
             var user = await _context.Users.FindAsync(userId);
 
-            // Админ может редактировать любые сообщения
             if (user.IsGlobalAdmin)
                 return true;
 
-            // Иначе только свои сообщения
             return message.SenderId == userId;
         }
 
@@ -348,22 +400,18 @@ namespace CorpMsg.Controllers
         {
             var user = await _context.Users.FindAsync(userId);
 
-            // Админ может удалять любые сообщения
             if (user.IsGlobalAdmin)
                 return true;
 
-            // Руководитель отдела может удалять сообщения в чатах своего отдела
             if (await IsDepartmentHead(userId, message.Chat.DepartmentId))
                 return true;
 
-            // Модератор может удалять сообщения в своем чате
             var membership = await _context.ChatMembers
                 .FirstOrDefaultAsync(cm => cm.ChatId == message.ChatId && cm.UserId == userId);
 
             if (membership != null && membership.Role == ChatMemberRole.Moderator)
                 return true;
 
-            // Автор может удалять свои сообщения
             return message.SenderId == userId;
         }
 
@@ -384,7 +432,7 @@ namespace CorpMsg.Controllers
             {
                 UserId = userId,
                 Title = "Новое сообщение",
-                Content = $"Новое сообщение в чате",
+                Content = message.IsMedia ? "Отправлен файл" : message.Content.Length > 50 ? message.Content.Substring(0, 50) + "..." : message.Content,
                 Type = NotificationType.NewMessage,
                 ReferenceId = message.ChatId
             }).ToList();
@@ -397,7 +445,6 @@ namespace CorpMsg.Controllers
         {
             var user = await _context.Users.FindAsync(userId);
 
-            // Логируем только для администраторов и руководителей
             if (user.IsGlobalAdmin || await IsDepartmentHead(userId,
                 (await _context.Chats.FindAsync(chatId)).DepartmentId))
             {
@@ -433,6 +480,9 @@ namespace CorpMsg.Controllers
                 Content = message.Content,
                 Type = message.Type,
                 MediaUrl = message.MediaUrl,
+                MediaFileName = message.MediaFileName,
+                MediaFileSize = message.MediaFileSize,
+                IsMedia = message.IsMedia,
                 CreatedAt = message.CreatedAt,
                 IsEdited = message.IsEdited,
                 SenderId = message.SenderId,
@@ -450,15 +500,12 @@ namespace CorpMsg.Controllers
         }
     }
 
+    // Обновленные DTO
     public class SendMessageRequest
     {
         public Guid ChatId { get; set; }
         public string Content { get; set; } = string.Empty;
-        public MessageType Type { get; set; }
-        public string? MediaUrl { get; set; }
-        public string? MediaFileName { get; set; }
-        public long? MediaFileSize { get; set; }
-        public string? MediaContentType { get; set; }
+        public IFormFile? File { get; set; } // Добавляем файл
     }
 
     public class EditMessageRequest
@@ -486,6 +533,9 @@ namespace CorpMsg.Controllers
         public string Content { get; set; } = string.Empty;
         public MessageType Type { get; set; }
         public string? MediaUrl { get; set; }
+        public string? MediaFileName { get; set; }
+        public long? MediaFileSize { get; set; }
+        public bool IsMedia { get; set; }
         public DateTime CreatedAt { get; set; }
         public bool IsEdited { get; set; }
         public Guid SenderId { get; set; }

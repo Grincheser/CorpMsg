@@ -97,7 +97,6 @@ namespace CorpMsg.Controllers
             if (currentUserId == Guid.Empty)
                 return Unauthorized("Пользователь не аутентифицирован");
 
-            // Проверка доступа к чату
             if (!await CanAccessChat(chatId, currentUserId))
                 return Forbid("У вас нет доступа к этому чату");
 
@@ -105,7 +104,23 @@ namespace CorpMsg.Controllers
             if (chat == null || string.IsNullOrEmpty(chat.AvatarUrl))
                 return NotFound("Аватар чата не установлен");
 
-            return Ok(new { avatarUrl = chat.AvatarUrl });
+            // Извлекаем objectName из сохраненного URL
+            var objectName = ExtractObjectName(chat.AvatarUrl);
+
+            // Генерируем временную ссылку (действительна 7 дней для аватаров)
+            var presignedUrl = await _fileStorageService.GeneratePresignedUrlAsync(objectName, TimeSpan.FromDays(7));
+
+            return Ok(new { avatarUrl = presignedUrl });
+        }
+
+        private string ExtractObjectName(string fileUrl)
+        {
+            if (fileUrl.Contains("?fileUrl="))
+            {
+                var encoded = fileUrl.Split("?fileUrl=")[1];
+                return Uri.UnescapeDataString(encoded);
+            }
+            return fileUrl;
         }
 
         private async Task<bool> CanManageChat(Guid chatId, Guid userId)

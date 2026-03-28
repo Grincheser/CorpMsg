@@ -1,9 +1,11 @@
-﻿using CorpMsg.DTOs;
+﻿using CorpMsg.AppData;
+using CorpMsg.DTOs;
 using CorpMsg.Service;
 using CorpMsg.Services;
 using CorpMsg.SupportClasses;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
 namespace CorpMsg.Controllers
@@ -14,11 +16,16 @@ namespace CorpMsg.Controllers
     public class FileController : ControllerBase
     {
         private readonly IFileStorageService _fileStorageService;
+        private readonly ApplicationDbContext _context;
         private readonly ILogger<FileController> _logger;
 
-        public FileController(IFileStorageService fileStorageService, ILogger<FileController> logger)
+        public FileController(
+            IFileStorageService fileStorageService,
+            ApplicationDbContext context,
+            ILogger<FileController> logger)
         {
             _fileStorageService = fileStorageService;
+            _context = context;
             _logger = logger;
         }
 
@@ -46,10 +53,18 @@ namespace CorpMsg.Controllers
                 if (currentUserId == Guid.Empty)
                     return Unauthorized("Пользователь не аутентифицирован");
 
-                var stream = await _fileStorageService.DownloadFileAsync(fileUrl);
-                var contentType = GetContentType(fileUrl);
+                // Извлекаем objectName из URL
+                var objectName = ExtractObjectName(fileUrl);
 
-                return File(stream, contentType, Path.GetFileName(fileUrl));
+                // ПРОВЕРКА ПРАВ ДОСТУПА!
+                if (!await CanAccessFile(objectName, currentUserId))
+                    return Forbid("У вас нет доступа к этому файлу");
+
+                // Генерируем временную ссылку (действительна 1 час)
+                var presignedUrl = await _fileStorageService.GeneratePresignedUrlAsync(objectName, TimeSpan.FromHours(1));
+
+                // Перенаправляем на временную ссылку
+                return Redirect(presignedUrl);
             }
             catch (FileNotFoundException)
             {
@@ -73,8 +88,57 @@ namespace CorpMsg.Controllers
             if (currentUserId == Guid.Empty)
                 return Unauthorized("Пользователь не аутентифицирован");
 
-            var url = await _fileStorageService.GeneratePresignedUrlAsync(fileUrl, TimeSpan.FromSeconds(expirySeconds));
-            return Ok(new { Url = url });
+            var objectName = ExtractObjectName(fileUrl);
+
+            if (!await CanAccessFile(objectName, currentUserId))
+                return Forbid("У вас нет доступа к этому файлу");
+
+            var url = await _fileStorageService.GeneratePresignedUrlAsync(objectName, TimeSpan.FromSeconds(expirySeconds));
+            return Ok(new { Url = url, ExpiresIn = expirySeconds });
+        }
+
+        private async Task<bool> CanAccessFile(string objectName, Guid userId)
+        {
+            var user = await _context.Users.FindAsync(userId);
+            if (user.IsGlobalAdmin) return true;
+
+            // Аватары пользователей - только свои
+            if (objectName.StartsWith($"users/{userId}/"))
+                return true;
+
+            // Аватары чатов - проверка членства в чате
+            if (objectName.StartsWith("chats/"))
+            {
+                var parts = objectName.Split('/');
+                if (parts.Length >= 2 && Guid.TryParse(parts[1], out var chatId))
+                {
+                    return await _context.ChatMembers
+                        .AnyAsync(cm => cm.ChatId == chatId && cm.UserId == userId);
+                }
+            }
+
+            // Медиа в сообщениях - проверка членства в чате
+            if (objectName.StartsWith("chats/") && objectName.Contains("/messages/"))
+            {
+                var parts = objectName.Split('/');
+                if (parts.Length >= 2 && Guid.TryParse(parts[1], out var chatId))
+                {
+                    return await _context.ChatMembers
+                        .AnyAsync(cm => cm.ChatId == chatId && cm.UserId == userId);
+                }
+            }
+
+            return false;
+        }
+
+        private string ExtractObjectName(string fileUrl)
+        {
+            if (fileUrl.Contains("?fileUrl="))
+            {
+                var encoded = fileUrl.Split("?fileUrl=")[1];
+                return Uri.UnescapeDataString(encoded);
+            }
+            return fileUrl;
         }
 
         private Guid GetCurrentUserId()

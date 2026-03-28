@@ -259,8 +259,7 @@ namespace CorpMsg.Models
 
         public long? MediaFileSize { get; set; } // Размер файла в байтах
 
-        [MaxLength(100)]
-        public string? MediaContentType { get; set; } // MIME тип файла
+        public bool IsMedia { get; set; } = false;
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
@@ -283,6 +282,10 @@ namespace CorpMsg.Models
         public Guid? ForwardedFromMessageId { get; set; }
         [ForeignKey(nameof(ForwardedFromMessageId))]
         public Message? ForwardedFrom { get; set; }
+
+        public Guid? ReplyToMessageId { get; set; }
+        [ForeignKey(nameof(ReplyToMessageId))]
+        public Message? ReplyToMessage { get; set; }
     }
 
     /// <summary>

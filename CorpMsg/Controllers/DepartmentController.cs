@@ -73,6 +73,55 @@ namespace CorpMsg.Controllers
                 throw;
             }
         }
+        /// <summary>
+        /// Редактирование отдела (только глобальный админ)
+        /// </summary>
+        [HttpPut("{id}")]
+        [Authorize(Roles = "GlobalAdmin")]
+        public async Task<IActionResult> UpdateDepartment(Guid id, UpdateDepartmentRequest request)
+        {
+            var department = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == id && !d.IsDeleted);
+
+            if (department == null)
+                return NotFound();
+
+            department.Name = request.Name;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { department.Id, department.Name });
+        }
+        public class UpdateDepartmentRequest
+        {
+            public string Name { get; set; } = string.Empty;
+        }
+        /// <summary>
+        /// Редактирование отдела (только глобальный админ)
+        /// </summary>
+
+        [HttpDelete("{id}")]
+        [Authorize(Roles = "GlobalAdmin")]
+        public async Task<IActionResult> DeleteDepartment(Guid id)
+        {
+            var department = await _context.Departments
+                .Include(d => d.Employees)
+                .FirstOrDefaultAsync(d => d.Id == id && !d.IsDeleted);
+
+            if (department == null)
+                return NotFound();
+
+            // Проверка, есть ли сотрудники в отделе
+            if (department.Employees.Any(e => !e.IsFrozen))
+            {
+                return BadRequest("Нельзя удалить отдел с активными сотрудниками");
+            }
+
+            department.IsDeleted = true;
+            department.DeletedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Отдел удален" });
+        }
 
         /// <summary>
         /// Назначение руководителя отдела (только глобальный админ)
