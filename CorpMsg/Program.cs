@@ -53,15 +53,23 @@ builder.Services.AddSwaggerGen(c =>
 // Настройка SignalR
 builder.Services.AddSignalR();
 
-// Настройка CORS
+// Настройка CORS - ИСПРАВЛЕНО
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowReactApp", policy =>
+    options.AddPolicy("AllowAll", policy =>
     {
-        policy.WithOrigins("http://localhost:3000") // URL React приложения
-              .AllowAnyHeader()
-              .AllowAnyMethod()
-              .AllowCredentials();
+        policy
+            .WithOrigins(
+                "http://localhost:3000",      // React development
+                "http://localhost:5173",      // Vite development  
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:5173",
+                "https://ravenapp.ru",        // Production frontend
+                "https://www.ravenapp.ru"     // Production frontend
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
     });
 });
 
@@ -103,6 +111,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
+// Настройка MinIO клиента
 builder.Services.AddSingleton<IMinioClient>(sp =>
 {
     var configuration = sp.GetRequiredService<IConfiguration>();
@@ -123,8 +132,9 @@ builder.Services.AddSingleton<IMinioClient>(sp =>
 // Регистрация сервисов
 builder.Services.AddScoped<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddScoped<IBannedWordsService, BannedWordsService>();
+builder.Services.AddScoped<IFileStorageService, FileStorageService>();
 
-// Добавьте rate limiting
+// Rate limiting
 builder.Services.AddRateLimiter(options =>
 {
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
@@ -140,38 +150,58 @@ builder.Services.AddRateLimiter(options =>
             }));
 });
 
-// Регистрация сервиса
-builder.Services.AddScoped<IFileStorageService, FileStorageService>();
-
 var app = builder.Build();
 
 // Настройка pipeline
-if (builder.Environment.IsDevelopment() || true) // Временно для тестирования
+if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
-        c.RoutePrefix = "swagger"; // Swagger будет доступен по /swagger
+        c.RoutePrefix = "swagger";
+    });
+}
+else
+{
+    // В продакшене тоже включаем Swagger для API документации (опционально)
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
+        c.RoutePrefix = "swagger";
     });
 }
 
 app.UseHttpsRedirection();
-app.UseCors("AllowReactApp");
+
+// ВАЖНО: CORS должен быть между UseHttpsRedirection и UseAuthentication
+app.UseCors("AllowAll");
 
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.UseRateLimiter();
+
 // Настройка Security Headers
 app.Use(async (context, next) =>
 {
     context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-    context.Response.Headers.Add("X-Frame-Options", "DENY");
+    context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
     context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
     context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
-    context.Response.Headers.Add("Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; media-src 'self';");
+
+    // CSP для продакшена
+    if (!app.Environment.IsDevelopment())
+    {
+        context.Response.Headers.Add("Content-Security-Policy",
+            "default-src 'self'; " +
+            "img-src 'self' data: https://ravenapp.ru; " +
+            "media-src 'self' https://ravenapp.ru; " +
+            "script-src 'self' 'unsafe-inline'; " +
+            "style-src 'self' 'unsafe-inline';");
+    }
+
     await next();
 });
 
@@ -181,8 +211,17 @@ app.MapHub<ChatHub>("/hubs/chat");
 // Автоматическая миграция при запуске
 using (var scope = app.Services.CreateScope())
 {
-    var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    dbContext.Database.Migrate();
+    try
+    {
+        var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        dbContext.Database.Migrate();
+        Console.WriteLine("Database migrations completed successfully.");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Database migration failed: {ex.Message}");
+        throw;
+    }
 }
 
 app.Run();
