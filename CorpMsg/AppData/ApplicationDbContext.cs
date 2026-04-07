@@ -26,7 +26,8 @@ namespace CorpMsg.AppData
         {
             base.OnModelCreating(modelBuilder);
 
-     
+            modelBuilder.Entity<User>()
+           .HasQueryFilter(u => !u.IsDeleted);
             // Составной первичный ключ для ChatMember
             modelBuilder.Entity<ChatMember>()
                 .HasKey(cm => new { cm.ChatId, cm.UserId });

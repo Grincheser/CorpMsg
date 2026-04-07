@@ -232,6 +232,17 @@ namespace CorpMsg.Controllers
             var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
             var isAdmin = User.IsInRole("GlobalAdmin");
 
+            // Получаем информацию о пользователе
+            var currentUser = await _context.Users
+                .FirstOrDefaultAsync(u => u.Id == userId);
+
+            if (currentUser == null)
+                return NotFound("Пользователь не найден");
+
+            // Проверяем, является ли пользователь руководителем какого-либо отдела
+            var isDepartmentHead = await _context.Departments
+                .AnyAsync(d => d.HeadId == userId && !d.IsDeleted);
+
             IQueryable<Chat> query;
 
             if (isAdmin)
@@ -242,9 +253,18 @@ namespace CorpMsg.Controllers
                     .Include(c => c.Members)
                     .Where(c => c.Department.CompanyId == companyId && !c.IsDeleted);
             }
+            else if (isDepartmentHead && currentUser.DepartmentId.HasValue)
+            {
+                // 🔧 ИСПРАВЛЕНИЕ: Руководитель видит ВСЕ чаты своего отдела
+                // Даже те, в которых он не состоит как участник
+                query = _context.Chats
+                    .Include(c => c.Department)
+                    .Include(c => c.Members)
+                    .Where(c => c.DepartmentId == currentUser.DepartmentId.Value && !c.IsDeleted);
+            }
             else
             {
-                // Обычный пользователь видит чаты, где он участник
+                // Обычный пользователь видит только чаты, где он участник
                 query = _context.Chats
                     .Include(c => c.Department)
                     .Include(c => c.Members)
@@ -264,11 +284,26 @@ namespace CorpMsg.Controllers
                     .OrderByDescending(m => m.CreatedAt)
                     .FirstOrDefaultAsync();
 
+                // Для руководителя отдела, если он не участник чата, joinedAt = DateTime.MinValue
+                // Это значит, что все сообщения будут считаться непрочитанными (что логично)
                 var userMembership = chat.Members.FirstOrDefault(m => m.UserId == userId);
                 var joinedAt = userMembership?.JoinedAt ?? DateTime.MinValue;
 
                 var unreadCount = await _context.Messages
                     .CountAsync(m => m.ChatId == chat.Id && m.CreatedAt > joinedAt);
+
+                // Определяем роль пользователя в чате
+                ChatMemberRole userRole = ChatMemberRole.Member;
+                if (userMembership != null)
+                {
+                    userRole = userMembership.Role;
+                }
+                else if (isDepartmentHead && chat.DepartmentId == currentUser.DepartmentId)
+                {
+                    // Руководитель отдела, не являющийся участником чата,
+                    // все равно имеет права руководителя для целей мониторинга
+                    userRole = ChatMemberRole.Head;
+                }
 
                 response.Add(new ChatListResponse
                 {
@@ -281,14 +316,30 @@ namespace CorpMsg.Controllers
                     LastMessageAt = lastMessage?.CreatedAt,
                     UnreadCount = unreadCount,
                     MemberCount = chat.Members.Count,
-                    UserRole = chat.Members
-                        .FirstOrDefault(m => m.UserId == userId)?.Role ?? ChatMemberRole.Member
+                    // 🔧 ИСПРАВЛЕНИЕ: Правильно определяем роль пользователя в чате
+                    UserRole = GetUserRoleInChat(chat, userId, isDepartmentHead, currentUser?.DepartmentId)
                 });
             }
 
             return Ok(response);
         }
+        private ChatMemberRole GetUserRoleInChat(Chat chat, Guid userId, bool isDepartmentHead, Guid? userDepartmentId)
+        {
+            var membership = chat.Members.FirstOrDefault(m => m.UserId == userId);
 
+            if (membership != null)
+            {
+                return membership.Role;
+            }
+
+            // Если пользователь не участник, но является руководителем отдела-владельца чата
+            if (isDepartmentHead && chat.DepartmentId == userDepartmentId)
+            {
+                return ChatMemberRole.Head;
+            }
+
+            return ChatMemberRole.Member;
+        }
         /// <summary>
         /// Получение информации о чате
         /// </summary>

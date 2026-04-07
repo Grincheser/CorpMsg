@@ -22,11 +22,14 @@ namespace CorpMsg.Controllers
         /// <summary>
         /// Создание отдела (только глобальный админ)
         /// </summary>
+        // В DepartmentController.CreateDepartment()
+
         [HttpPost]
         [Authorize(Roles = "GlobalAdmin")]
         public async Task<ActionResult<DepartmentResponse>> CreateDepartment(CreateDepartmentRequest request)
         {
             var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
+            var currentUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
 
             // Проверка уникальности названия в рамках компании
             if (await _context.Departments.AnyAsync(d =>
@@ -52,11 +55,25 @@ namespace CorpMsg.Controllers
                     Description = $"Системный чат отдела {request.Name}",
                     IsSystemChat = true,
                     DepartmentId = department.Id,
-                    CreatedByUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier))
+                    CreatedByUserId = currentUserId
                 };
                 _context.Chats.Add(systemChat);
                 await _context.SaveChangesAsync();
 
+                // 🔧 НОВОЕ: Добавляем создателя в системный чат
+                // Если создатель является руководителем этого отдела (только что созданного),
+                // даем ему роль Head, иначе Member
+                var isHead = department.HeadId == currentUserId;
+
+                _context.ChatMembers.Add(new ChatMember
+                {
+                    ChatId = systemChat.Id,
+                    UserId = currentUserId,
+                    Role = isHead ? ChatMemberRole.Head : ChatMemberRole.Moderator,
+                    JoinedAt = DateTime.UtcNow
+                });
+
+                await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
 
                 return Ok(new DepartmentResponse
@@ -123,6 +140,8 @@ namespace CorpMsg.Controllers
             return Ok(new { message = "Отдел удален" });
         }
 
+        // В DepartmentController.cs
+
         /// <summary>
         /// Назначение руководителя отдела (только глобальный админ)
         /// </summary>
@@ -143,26 +162,71 @@ namespace CorpMsg.Controllers
             if (user == null)
                 return BadRequest("Пользователь не найден в этом отделе");
 
+            // Сохраняем старого руководителя для логирования
+            var oldHeadId = department.HeadId;
+
+            // Назначаем нового руководителя
             department.HeadId = user.Id;
 
-            // Обновляем роль в системном чате
+            // 🔧 НОВОЕ: Обновляем роль в системном чате
             var systemChat = await _context.Chats
-                .FirstOrDefaultAsync(c => c.DepartmentId == department.Id && c.IsSystemChat);
+                .FirstOrDefaultAsync(c => c.DepartmentId == department.Id && c.IsSystemChat && !c.IsDeleted);
 
             if (systemChat != null)
             {
+                // Если у старого руководителя была роль Head в системном чате, понижаем до Member
+                if (oldHeadId.HasValue)
+                {
+                    var oldHeadMembership = await _context.ChatMembers
+                        .FirstOrDefaultAsync(cm => cm.ChatId == systemChat.Id && cm.UserId == oldHeadId.Value);
+
+                    if (oldHeadMembership != null && oldHeadMembership.Role == ChatMemberRole.Head)
+                    {
+                        oldHeadMembership.Role = ChatMemberRole.Member;
+                    }
+                }
+
+                // Находим или создаем членство для нового руководителя
                 var membership = await _context.ChatMembers
                     .FirstOrDefaultAsync(cm => cm.ChatId == systemChat.Id && cm.UserId == user.Id);
 
                 if (membership != null)
                 {
+                    // Обновляем существующее членство
                     membership.Role = ChatMemberRole.Head;
                 }
+                else
+                {
+                    // Создаем новое членство с ролью Head
+                    _context.ChatMembers.Add(new ChatMember
+                    {
+                        ChatId = systemChat.Id,
+                        UserId = user.Id,
+                        Role = ChatMemberRole.Head,
+                        JoinedAt = DateTime.UtcNow
+                    });
+                }
+
+                // Создаем уведомление для нового руководителя
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = user.Id,
+                    Title = "Назначение руководителем",
+                    Content = $"Вы назначены руководителем отдела '{department.Name}'",
+                    Type = NotificationType.RoleChanged,
+                    ReferenceId = department.Id
+                });
             }
 
             await _context.SaveChangesAsync();
 
-            return Ok();
+            return Ok(new
+            {
+                message = "Руководитель отдела назначен",
+                departmentId = department.Id,
+                headId = user.Id,
+                headName = user.FullName
+            });
         }
 
         /// <summary>

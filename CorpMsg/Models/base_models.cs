@@ -26,7 +26,8 @@ namespace CorpMsg.Models
         AddedToChat = 1,
         AddedToDepartment = 2,
         UserFrozen = 3,
-        System = 4
+        System = 4,
+        RoleChanged = 5
     }
 
     public enum AuditAction
@@ -90,6 +91,10 @@ namespace CorpMsg.Models
         public bool IsGlobalAdmin { get; set; } = false; // Права глобального администратора
 
         public bool IsFrozen { get; set; } = false; // Заморозка аккаунта (декрет, увольнение)
+
+        public bool IsDeleted { get; set; } = false;
+        public DateTime? DeletedAt { get; set; }
+        public Guid? DeletedByUserId { get; set; }
 
         // Компания пользователя
         [MaxLength(500)]
