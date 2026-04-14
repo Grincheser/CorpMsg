@@ -20,13 +20,13 @@ namespace CorpMsg.Controllers
         private readonly ApplicationDbContext _context;
         private readonly IHubContext<ChatHub> _hubContext;
         private readonly IBannedWordsService _bannedWordsService;
-        private readonly IFileStorageService _fileStorageService; // Добавляем сервис для файлов
+        private readonly IFileStorageService _fileStorageService;
 
         public MessageController(
             ApplicationDbContext context,
             IHubContext<ChatHub> hubContext,
             IBannedWordsService bannedWordsService,
-            IFileStorageService fileStorageService) // Добавляем в конструктор
+            IFileStorageService fileStorageService)
         {
             _context = context;
             _hubContext = hubContext;

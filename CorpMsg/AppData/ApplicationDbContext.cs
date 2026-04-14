@@ -10,7 +10,6 @@ namespace CorpMsg.AppData
         {
         }
 
-        // DbSet для всех сущностей
         public DbSet<Company> Companies { get; set; } = null!;
         public DbSet<User> Users { get; set; } = null!;
         public DbSet<Department> Departments { get; set; } = null!;
@@ -28,15 +27,12 @@ namespace CorpMsg.AppData
 
             modelBuilder.Entity<User>()
            .HasQueryFilter(u => !u.IsDeleted);
-            // Составной первичный ключ для ChatMember
             modelBuilder.Entity<ChatMember>()
                 .HasKey(cm => new { cm.ChatId, cm.UserId });
 
-            // Составной первичный ключ для ChatDepartment
             modelBuilder.Entity<ChatDepartment>()
                 .HasKey(cd => new { cd.ChatId, cd.DepartmentId });
 
-            // Индексы для поиска
             modelBuilder.Entity<User>()
                 .HasIndex(u => u.FullName)
                 .HasDatabaseName("IX_User_FullName");
@@ -102,25 +98,21 @@ namespace CorpMsg.AppData
                 .HasIndex(b => b.Word)
                 .HasDatabaseName("IX_BannedWord_Word");
 
-            // Уникальность имени отдела в рамках компании
             modelBuilder.Entity<Department>()
                 .HasIndex(d => new { d.CompanyId, d.Name })
                 .IsUnique()
                 .HasDatabaseName("IX_Department_Company_Name");
 
-            // Уникальность логина пользователя в рамках компании
             modelBuilder.Entity<User>()
                 .HasIndex(u => new { u.CompanyId, u.Username })
                 .IsUnique()
                 .HasDatabaseName("IX_User_Company_Username");
 
-            // Связь User-Status один-к-одному
             modelBuilder.Entity<User>()
                 .HasOne(u => u.Status)
                 .WithOne(s => s.User)
                 .HasForeignKey<UserStatus>(s => s.UserId);
 
-            // Настройка связей и каскадного удаления
             modelBuilder.Entity<ChatMember>()
                 .HasOne(cm => cm.Chat)
                 .WithMany(c => c.Members)
@@ -155,7 +147,7 @@ namespace CorpMsg.AppData
                 .HasOne(m => m.Sender)
                 .WithMany(u => u.Messages)
                 .HasForeignKey(m => m.SenderId)
-                .OnDelete(DeleteBehavior.Restrict); // Не удаляем сообщения при удалении пользователя
+                .OnDelete(DeleteBehavior.Restrict); 
 
             modelBuilder.Entity<Message>()
                 .HasOne(m => m.ForwardedFrom)
@@ -197,13 +189,13 @@ namespace CorpMsg.AppData
                 .HasOne(u => u.Department)
                 .WithMany(d => d.Employees)
                 .HasForeignKey(u => u.DepartmentId)
-                .OnDelete(DeleteBehavior.SetNull); // При удалении отдела, сотрудники остаются без отдела
+                .OnDelete(DeleteBehavior.SetNull); 
 
             modelBuilder.Entity<Chat>()
                 .HasOne(c => c.Department)
                 .WithMany(d => d.OwnedChats)
                 .HasForeignKey(c => c.DepartmentId)
-                .OnDelete(DeleteBehavior.Restrict); // Запрещаем удаление отдела, если есть чаты
+                .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<Chat>()
                 .HasOne(c => c.CreatedBy)
@@ -217,8 +209,7 @@ namespace CorpMsg.AppData
                 .HasForeignKey(b => b.CompanyId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Настройка для JSON полей
-            modelBuilder.Entity<AuditLog>()
+           modelBuilder.Entity<AuditLog>()
                 .Property(a => a.OldValue)
                 .HasColumnType("jsonb");
 
@@ -226,7 +217,6 @@ namespace CorpMsg.AppData
                 .Property(a => a.NewValue)
                 .HasColumnType("jsonb");
 
-            // Глобальные фильтры для мягкого удаления
             modelBuilder.Entity<Department>()
                 .HasQueryFilter(d => !d.IsDeleted);
 
@@ -236,7 +226,6 @@ namespace CorpMsg.AppData
             modelBuilder.Entity<Message>()
                 .HasQueryFilter(m => !m.IsDeleted);
 
-            // Индекс для быстрого поиска по статусу
             modelBuilder.Entity<UserStatus>()
                 .HasIndex(us => us.IsOnline)
                 .HasDatabaseName("IX_UserStatus_IsOnline");
@@ -245,12 +234,10 @@ namespace CorpMsg.AppData
                 .HasIndex(us => us.LastSeenAt)
                 .HasDatabaseName("IX_UserStatus_LastSeenAt");
 
-            // Составной индекс для поиска сообщений по чату и дате
             modelBuilder.Entity<Message>()
                 .HasIndex(m => new { m.ChatId, m.CreatedAt })
                 .HasDatabaseName("IX_Message_Chat_CreatedAt");
 
-            // Индекс для поиска участников чата по роли
             modelBuilder.Entity<ChatMember>()
                 .HasIndex(cm => new { cm.ChatId, cm.Role })
                 .HasDatabaseName("IX_ChatMember_Chat_Role");

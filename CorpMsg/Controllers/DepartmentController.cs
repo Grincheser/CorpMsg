@@ -22,8 +22,6 @@ namespace CorpMsg.Controllers
         /// <summary>
         /// Создание отдела (только глобальный админ)
         /// </summary>
-        // В DepartmentController.CreateDepartment()
-
         [HttpPost]
         [Authorize(Roles = "GlobalAdmin")]
         public async Task<ActionResult<DepartmentResponse>> CreateDepartment(CreateDepartmentRequest request)
@@ -39,10 +37,12 @@ namespace CorpMsg.Controllers
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
+                // Создаем отдел и сразу назначаем создателя руководителем
                 var department = new Department
                 {
                     Name = request.Name,
-                    CompanyId = companyId
+                    CompanyId = companyId,
+                    HeadId = currentUserId  // 👈 Назначаем создателя руководителем
                 };
 
                 _context.Departments.Add(department);
@@ -60,17 +60,23 @@ namespace CorpMsg.Controllers
                 _context.Chats.Add(systemChat);
                 await _context.SaveChangesAsync();
 
-                // 🔧 НОВОЕ: Добавляем создателя в системный чат
-                // Если создатель является руководителем этого отдела (только что созданного),
-                // даем ему роль Head, иначе Member
-                var isHead = department.HeadId == currentUserId;
-
+                // Добавляем создателя (руководителя) в системный чат с ролью Head
                 _context.ChatMembers.Add(new ChatMember
                 {
                     ChatId = systemChat.Id,
                     UserId = currentUserId,
-                    Role = isHead ? ChatMemberRole.Head : ChatMemberRole.Moderator,
+                    Role = ChatMemberRole.Head,  // 👈 Руководитель получает роль Head
                     JoinedAt = DateTime.UtcNow
+                });
+
+                // Создаем уведомление для руководителя
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = currentUserId,
+                    Title = "Отдел создан",
+                    Content = $"Вы создали отдел '{department.Name}' и назначены его руководителем",
+                    Type = NotificationType.System,
+                    ReferenceId = department.Id
                 });
 
                 await _context.SaveChangesAsync();
@@ -80,16 +86,21 @@ namespace CorpMsg.Controllers
                 {
                     Id = department.Id,
                     Name = department.Name,
-                    EmployeeCount = 0,
+                    HeadId = department.HeadId,
+                    HeadName = User.FindFirstValue(ClaimTypes.Name), // Или получите из БД
+                    EmployeeCount = 1, // Создатель - первый сотрудник
                     SystemChatId = systemChat.Id
                 });
             }
-            catch
+            catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                throw;
+                // Логируем ошибку
+                Console.WriteLine($"Error creating department: {ex.Message}");
+                return StatusCode(500, "Ошибка при создании отдела");
             }
         }
+
         /// <summary>
         /// Редактирование отдела (только глобальный админ)
         /// </summary>
@@ -157,7 +168,7 @@ namespace CorpMsg.Controllers
 
             var user = await _context.Users
                 .FirstOrDefaultAsync(u => u.Id == request.UserId &&
-                    u.DepartmentId == department.Id);
+                    u.DepartmentId == department.Id && !u.IsFrozen);
 
             if (user == null)
                 return BadRequest("Пользователь не найден в этом отделе");

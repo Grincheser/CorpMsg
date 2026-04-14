@@ -51,21 +51,31 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // Настройка SignalR
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.MaximumReceiveMessageSize = 102400; // 100KB
+    options.EnableDetailedErrors = true; // Для отладки
+});
 
-// Настройка CORS - ИСПРАВЛЕНО
+// Настройка CORS 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
     {
         policy
             .WithOrigins(
-                "http://localhost:3000",      // React development
-                "http://localhost:5173",      // Vite development  
+                "http://localhost:3000",
+                "http://localhost:5173",
                 "http://127.0.0.1:3000",
                 "http://127.0.0.1:5173",
-                "https://ravenapp.ru",        // Production frontend
-                "https://www.ravenapp.ru"     // Production frontend
+                "https://localhost:3000",    // Добавить
+                "https://localhost:5173",    // Добавить
+                "https://127.0.0.1:3000",    // Добавить
+                "https://127.0.0.1:5173",    // Добавить
+                "https://ravenapp.ru",
+                "https://www.ravenapp.ru"
             )
             .AllowAnyHeader()
             .AllowAnyMethod()
@@ -78,6 +88,14 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Настройка JWT аутентификации
+// Добавить проверку до использования
+var jwtKey = builder.Configuration["Jwt:Key"]
+    ?? throw new InvalidOperationException("Jwt:Key is not configured in appsettings.json");
+
+if (jwtKey.Length < 32)
+throw new InvalidOperationException("Jwt:Key must be at least 32 characters long");
+
+// Использовать проверенный ключ
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -87,10 +105,11 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]))
+            ValidIssuer = builder.Configuration["Jwt:Issuer"]
+                ?? throw new InvalidOperationException("Jwt:Issuer is not configured"),
+            ValidAudience = builder.Configuration["Jwt:Audience"]
+                ?? throw new InvalidOperationException("Jwt:Audience is not configured"),
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
         };
 
         // Настройка для SignalR
@@ -186,25 +205,45 @@ app.UseRateLimiter();
 // Настройка Security Headers
 app.Use(async (context, next) =>
 {
-    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-    context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
-    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
-    context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
-
-    // CSP для продакшена
-    if (!app.Environment.IsDevelopment())
+    if (context.Request.Method == "OPTIONS")
     {
-        context.Response.Headers.Add("Content-Security-Policy",
+        context.Response.StatusCode = 200;
+        context.Response.Headers.Add("Access-Control-Allow-Origin", context.Request.Headers["Origin"]);
+        context.Response.Headers.Add("Access-Control-Allow-Credentials", "true");
+        context.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        context.Response.Headers.Add("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With");
+        await context.Response.CompleteAsync();
+        return;
+    }
+    await next();
+});
+
+// Настройка Security Headers
+app.Use(async (context, next) =>
+{
+    // Пропускаем SignalR эндпоинты для заголовков безопасности
+    var path = context.Request.Path;
+    if (!path.StartsWithSegments("/hubs"))
+    {
+        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
+        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+        context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+
+        // CSP для продакшена
+        if (!app.Environment.IsDevelopment())
+        {
+            context.Response.Headers.Add("Content-Security-Policy",
             "default-src 'self'; " +
+            "connect-src 'self' ws: wss:; " +
             "img-src 'self' data: https://ravenapp.ru; " +
             "media-src 'self' https://ravenapp.ru; " +
             "script-src 'self' 'unsafe-inline'; " +
             "style-src 'self' 'unsafe-inline';");
+        }
     }
-
     await next();
 });
-
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 

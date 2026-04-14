@@ -111,13 +111,6 @@ namespace CorpMsg.Hubs
             await base.OnDisconnectedAsync(exception);
         }
 
-        /// <summary>
-        /// Отправка сообщения в чат
-        /// </summary>
-        public async Task SendMessageToChat(Guid chatId, MessageResponse message)
-        {
-            await Clients.Group(chatId.ToString()).SendAsync("ReceiveMessage", message);
-        }
 
         /// <summary>
         /// Редактирование сообщения
@@ -202,6 +195,36 @@ namespace CorpMsg.Hubs
             {
                 await Clients.Client(connection.ConnectionId).SendAsync("ReceiveNotification", notification);
             }
+        }
+        /// <summary>
+        /// Отправка сообщения в чат
+        /// </summary>
+        private static readonly Dictionary<string, DateTime> _lastMessageTime = new();
+        private static readonly SemaphoreSlim _semaphore = new(1, 1);
+
+        public async Task SendMessageToChat(Guid chatId, MessageResponse message)
+        {
+            var userId = Context.UserIdentifier;
+
+            // Rate limiting для сообщений
+            var now = DateTime.UtcNow;
+            await _semaphore.WaitAsync();
+            try
+            {
+                if (_lastMessageTime.TryGetValue(userId, out var lastTime) &&
+                    (now - lastTime).TotalSeconds < 1) // 1 сообщение в секунду
+                {
+                    throw new HubException("Слишком много сообщений. Подождите немного.");
+                }
+                _lastMessageTime[userId] = now;
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
+
+            // Оригинальный код
+            await Clients.Group(chatId.ToString()).SendAsync("ReceiveMessage", message);
         }
     }
 
