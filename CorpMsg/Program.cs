@@ -51,17 +51,35 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // Настройка SignalR
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.MaximumReceiveMessageSize = 102400;
+    options.EnableDetailedErrors = true;
+});
 
-// Настройка CORS
+// Настройка CORS 
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowReactApp", policy =>
+    options.AddPolicy("AllowAll", policy =>
     {
-        policy.WithOrigins("http://localhost:3000") // URL React приложения
-              .AllowAnyHeader()
-              .AllowAnyMethod()
-              .AllowCredentials();
+        policy
+            .WithOrigins(
+                "http://localhost:3000",
+                "http://localhost:5173",
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:5173",
+                "https://localhost:3000",
+                "https://localhost:5173",
+                "https://127.0.0.1:3000",
+                "https://127.0.0.1:5173",
+                "https://ravenapp.ru",
+                "https://www.ravenapp.ru"
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
     });
 });
 
@@ -70,6 +88,12 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Настройка JWT аутентификации
+var jwtKey = builder.Configuration["Jwt:Key"]
+    ?? throw new InvalidOperationException("Jwt:Key is not configured in appsettings.json");
+
+if (jwtKey.Length < 32)
+    throw new InvalidOperationException("Jwt:Key must be at least 32 characters long");
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -79,10 +103,11 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]))
+            ValidIssuer = builder.Configuration["Jwt:Issuer"]
+                ?? throw new InvalidOperationException("Jwt:Issuer is not configured"),
+            ValidAudience = builder.Configuration["Jwt:Audience"]
+                ?? throw new InvalidOperationException("Jwt:Audience is not configured"),
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
         };
 
         // Настройка для SignalR
@@ -103,6 +128,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
+// Настройка MinIO клиента
 builder.Services.AddSingleton<IMinioClient>(sp =>
 {
     var configuration = sp.GetRequiredService<IConfiguration>();
@@ -110,19 +136,22 @@ builder.Services.AddSingleton<IMinioClient>(sp =>
     var accessKey = configuration["Minio:AccessKey"] ?? "minioadmin";
     var secretKey = configuration["Minio:SecretKey"] ?? "minioadmin";
     var useSsl = bool.Parse(configuration["Minio:UseSsl"] ?? "false");
+    var region = configuration["Minio:Region"] ?? "us-east-1";
 
     return new MinioClient()
         .WithEndpoint(endpoint)
         .WithCredentials(accessKey, secretKey)
         .WithSSL(useSsl)
+        .WithRegion(region)
         .Build();
 });
 
 // Регистрация сервисов
 builder.Services.AddScoped<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddScoped<IBannedWordsService, BannedWordsService>();
+builder.Services.AddScoped<IFileStorageService, FileStorageService>();
 
-// Добавьте rate limiting
+// Rate limiting
 builder.Services.AddRateLimiter(options =>
 {
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
@@ -138,49 +167,115 @@ builder.Services.AddRateLimiter(options =>
             }));
 });
 
-// Регистрация сервиса
-builder.Services.AddScoped<IFileStorageService, FileStorageService>();
-
 var app = builder.Build();
 
-// Настройка pipeline
-if (builder.Environment.IsDevelopment() || true) // Временно для тестирования
+// ==========================================
+// ПРАВИЛЬНЫЙ ПОРЯДОК MIDDLEWARE
+// ==========================================
+
+// 1. СНАЧАЛА: Обработка OPTIONS запросов (preflight) ДО CORS
+app.Use(async (context, next) =>
+{
+    if (context.Request.Method == "OPTIONS")
+    {
+        context.Response.StatusCode = 200;
+        var origin = context.Request.Headers["Origin"].ToString();
+        if (!string.IsNullOrEmpty(origin))
+        {
+            context.Response.Headers.Add("Access-Control-Allow-Origin", origin);
+        }
+        context.Response.Headers.Add("Access-Control-Allow-Credentials", "true");
+        context.Response.Headers.Add("Access-Control-Allow-Methods",
+            "GET, POST, PUT, DELETE, OPTIONS");
+        context.Response.Headers.Add("Access-Control-Allow-Headers",
+            "Authorization, Content-Type, X-Requested-With");
+        await context.Response.CompleteAsync();
+        return;
+    }
+    await next();
+});
+
+// 2. Security Headers (кроме CSP для SignalR)
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+
+    // Пропускаем SignalR хабы, чтобы не ломать WebSockets
+    if (!path.StartsWithSegments("/hubs"))
+    {
+        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
+        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+        context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+
+        // CSP только для продакшена
+        if (!app.Environment.IsDevelopment())
+        {
+            context.Response.Headers.Add("Content-Security-Policy",
+                "default-src 'self'; " +
+                "connect-src 'self' ws: wss:; " +
+                "img-src 'self' data: https://ravenapp.ru; " +
+                "media-src 'self' https://ravenapp.ru; " +
+                "script-src 'self' 'unsafe-inline'; " +
+                "style-src 'self' 'unsafe-inline';");
+        }
+    }
+
+    await next();
+});
+
+// 3. Swagger (может быть до или после, не важно)
+if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
-        c.RoutePrefix = "swagger"; // Swagger будет доступен по /swagger
+        c.RoutePrefix = "swagger";
     });
 }
+else
+{
+    // Опционально: Swagger в продакшене (лучше отключить или защитить)
+    // app.UseSwagger();
+    // app.UseSwaggerUI(c =>
+    // {
+    //     c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
+    //     c.RoutePrefix = "swagger";
+    // });
+}
 
+// 4. HTTPS редирект
 app.UseHttpsRedirection();
-app.UseCors("AllowReactApp");
 
+// 5. CORS - ТЕПЕРЬ ПОСЛЕ ОБРАБОТКИ OPTIONS
+app.UseCors("AllowAll");
+
+// 6. Аутентификация и авторизация
 app.UseAuthentication();
 app.UseAuthorization();
 
+// 7. Rate limiting
 app.UseRateLimiter();
-// Настройка Security Headers
-app.Use(async (context, next) =>
-{
-    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-    context.Response.Headers.Add("X-Frame-Options", "DENY");
-    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
-    context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
-    context.Response.Headers.Add("Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; media-src 'self';");
-    await next();
-});
 
+// 8. Маршрутизация
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 
-// Автоматическая миграция при запуске
+// 9. Автоматическая миграция при запуске
 using (var scope = app.Services.CreateScope())
 {
-    var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    dbContext.Database.Migrate();
+    try
+    {
+        var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        dbContext.Database.Migrate();
+        Console.WriteLine("Database migrations completed successfully.");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Database migration failed: {ex.Message}");
+        throw;
+    }
 }
 
 app.Run();

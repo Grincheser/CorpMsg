@@ -27,6 +27,7 @@ namespace CorpMsg.Controllers
         public async Task<ActionResult<DepartmentResponse>> CreateDepartment(CreateDepartmentRequest request)
         {
             var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
+            var currentUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
 
             // Проверка уникальности названия в рамках компании
             if (await _context.Departments.AnyAsync(d =>
@@ -36,10 +37,13 @@ namespace CorpMsg.Controllers
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
+                // Создаем отдел и сразу назначаем создателя руководителем
                 var department = new Department
                 {
                     Name = request.Name,
-                    CompanyId = companyId
+                    CompanyId = companyId,
+                    HeadId = currentUserId,  // 👈 Назначаем создателя руководителем
+                    AllowRegularUsersToCreateChats = request.AllowRegularUsersToCreateChats
                 };
 
                 _context.Departments.Add(department);
@@ -52,27 +56,144 @@ namespace CorpMsg.Controllers
                     Description = $"Системный чат отдела {request.Name}",
                     IsSystemChat = true,
                     DepartmentId = department.Id,
-                    CreatedByUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier))
+                    CreatedByUserId = currentUserId
                 };
                 _context.Chats.Add(systemChat);
                 await _context.SaveChangesAsync();
 
+                // Добавляем создателя (руководителя) в системный чат с ролью Head
+                _context.ChatMembers.Add(new ChatMember
+                {
+                    ChatId = systemChat.Id,
+                    UserId = currentUserId,
+                    Role = ChatMemberRole.Head,  // 👈 Руководитель получает роль Head
+                    JoinedAt = DateTime.UtcNow
+                });
+
+                // Создаем уведомление для руководителя
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = currentUserId,
+                    Title = "Отдел создан",
+                    Content = $"Вы создали отдел '{department.Name}' и назначены его руководителем",
+                    Type = NotificationType.System,
+                    ReferenceId = department.Id
+                });
+
+                await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
 
                 return Ok(new DepartmentResponse
                 {
                     Id = department.Id,
                     Name = department.Name,
-                    EmployeeCount = 0,
-                    SystemChatId = systemChat.Id
+                    HeadId = department.HeadId,
+                    HeadName = User.FindFirstValue(ClaimTypes.Name), // Или получите из БД
+                    EmployeeCount = 1, // Создатель - первый сотрудник
+                    SystemChatId = systemChat.Id,
+                    AllowRegularUsersToCreateChats = department.AllowRegularUsersToCreateChats
                 });
             }
-            catch
+            catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                throw;
+                // Логируем ошибку
+                Console.WriteLine($"Error creating department: {ex.Message}");
+                return StatusCode(500, "Ошибка при создании отдела");
             }
         }
+
+        /// <summary>
+        /// Редактирование отдела (только глобальный админ)
+        /// </summary>
+        [HttpPut("{id}")]
+        [Authorize(Roles = "GlobalAdmin")]
+        public async Task<IActionResult> UpdateDepartment(Guid id, UpdateDepartmentRequest request)
+        {
+            var department = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == id && !d.IsDeleted);
+
+            if (department == null)
+                return NotFound();
+
+            department.Name = request.Name;
+
+            if (request.AllowRegularUsersToCreateChats.HasValue)
+            {
+                department.AllowRegularUsersToCreateChats = request.AllowRegularUsersToCreateChats.Value;
+            }
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new { department.Id, department.Name, department.AllowRegularUsersToCreateChats});
+        }
+        /// <summary>
+        /// Обновление настроек отдела (только глобальный админ)
+        /// </summary>
+        [HttpPatch("{id}/settings")]
+        [Authorize(Roles = "GlobalAdmin")]
+        public async Task<IActionResult> UpdateDepartmentSettings(Guid id, UpdateDepartmentSettingsRequest request)
+        {
+            var department = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == id && !d.IsDeleted);
+
+            if (department == null)
+                return NotFound();
+
+            // Обновляем только настройки
+            department.AllowRegularUsersToCreateChats = request.AllowRegularUsersToCreateChats;
+
+            await _context.SaveChangesAsync();
+
+            // Логируем изменение
+            _context.AuditLogs.Add(new AuditLog
+            {
+                UserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)),
+                CompanyId = department.CompanyId,
+                Action = AuditAction.Update,
+                EntityType = "DepartmentSettings",
+                EntityId = department.Id.ToString(),
+                NewValue = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    AllowRegularUsersToCreateChats = request.AllowRegularUsersToCreateChats
+                })
+            });
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = "Настройки отдела обновлены",
+                departmentId = department.Id,
+                department.Name,
+                department.AllowRegularUsersToCreateChats
+            });
+        }
+
+        [HttpDelete("{id}")]
+        [Authorize(Roles = "GlobalAdmin")]
+        public async Task<IActionResult> DeleteDepartment(Guid id)
+        {
+            var department = await _context.Departments
+                .Include(d => d.Employees)
+                .FirstOrDefaultAsync(d => d.Id == id && !d.IsDeleted);
+
+            if (department == null)
+                return NotFound();
+
+            // Проверка, есть ли сотрудники в отделе
+            if (department.Employees.Any(e => !e.IsFrozen))
+            {
+                return BadRequest("Нельзя удалить отдел с активными сотрудниками");
+            }
+
+            department.IsDeleted = true;
+            department.DeletedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Отдел удален" });
+        }
+
+        // В DepartmentController.cs
 
         /// <summary>
         /// Назначение руководителя отдела (только глобальный админ)
@@ -89,31 +210,76 @@ namespace CorpMsg.Controllers
 
             var user = await _context.Users
                 .FirstOrDefaultAsync(u => u.Id == request.UserId &&
-                    u.DepartmentId == department.Id);
+                    u.DepartmentId == department.Id && !u.IsFrozen);
 
             if (user == null)
                 return BadRequest("Пользователь не найден в этом отделе");
 
+            // Сохраняем старого руководителя для логирования
+            var oldHeadId = department.HeadId;
+
+            // Назначаем нового руководителя
             department.HeadId = user.Id;
 
-            // Обновляем роль в системном чате
+            // 🔧 НОВОЕ: Обновляем роль в системном чате
             var systemChat = await _context.Chats
-                .FirstOrDefaultAsync(c => c.DepartmentId == department.Id && c.IsSystemChat);
+                .FirstOrDefaultAsync(c => c.DepartmentId == department.Id && c.IsSystemChat && !c.IsDeleted);
 
             if (systemChat != null)
             {
+                // Если у старого руководителя была роль Head в системном чате, понижаем до Member
+                if (oldHeadId.HasValue)
+                {
+                    var oldHeadMembership = await _context.ChatMembers
+                        .FirstOrDefaultAsync(cm => cm.ChatId == systemChat.Id && cm.UserId == oldHeadId.Value);
+
+                    if (oldHeadMembership != null && oldHeadMembership.Role == ChatMemberRole.Head)
+                    {
+                        oldHeadMembership.Role = ChatMemberRole.Member;
+                    }
+                }
+
+                // Находим или создаем членство для нового руководителя
                 var membership = await _context.ChatMembers
                     .FirstOrDefaultAsync(cm => cm.ChatId == systemChat.Id && cm.UserId == user.Id);
 
                 if (membership != null)
                 {
+                    // Обновляем существующее членство
                     membership.Role = ChatMemberRole.Head;
                 }
+                else
+                {
+                    // Создаем новое членство с ролью Head
+                    _context.ChatMembers.Add(new ChatMember
+                    {
+                        ChatId = systemChat.Id,
+                        UserId = user.Id,
+                        Role = ChatMemberRole.Head,
+                        JoinedAt = DateTime.UtcNow
+                    });
+                }
+
+                // Создаем уведомление для нового руководителя
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = user.Id,
+                    Title = "Назначение руководителем",
+                    Content = $"Вы назначены руководителем отдела '{department.Name}'",
+                    Type = NotificationType.RoleChanged,
+                    ReferenceId = department.Id
+                });
             }
 
             await _context.SaveChangesAsync();
 
-            return Ok();
+            return Ok(new
+            {
+                message = "Руководитель отдела назначен",
+                departmentId = department.Id,
+                headId = user.Id,
+                headName = user.FullName
+            });
         }
 
         /// <summary>
@@ -141,10 +307,38 @@ namespace CorpMsg.Controllers
                 HeadName = d.Head?.FullName,
                 EmployeeCount = d.Employees.Count(e => !e.IsFrozen),
                 SystemChatId = _context.Chats
-                    .FirstOrDefault(c => c.DepartmentId == d.Id && c.IsSystemChat)?.Id
+                    .FirstOrDefault(c => c.DepartmentId == d.Id && c.IsSystemChat)?.Id,
+                AllowRegularUsersToCreateChats = d.AllowRegularUsersToCreateChats
             }).ToList();
 
             return Ok(response);
+        }
+        /// <summary>
+        /// Получение настроек отдела
+        /// </summary>
+        [HttpGet("{id}/settings")]
+        public async Task<ActionResult<DepartmentSettingsResponse>> GetDepartmentSettings(Guid id)
+        {
+            var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+            var user = await _context.Users.FindAsync(userId);
+
+            var department = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == id && !d.IsDeleted);
+
+            if (department == null)
+                return NotFound();
+
+            // Проверка прав: только админ или руководитель отдела
+            if (!user.IsGlobalAdmin && department.HeadId != userId)
+                return Forbid("Только администратор или руководитель отдела могут просматривать настройки");
+
+            return Ok(new DepartmentSettingsResponse
+            {
+                DepartmentId = department.Id,
+                DepartmentName = department.Name,
+                AllowRegularUsersToCreateChats = department.AllowRegularUsersToCreateChats,
+                CanCurrentUserChange = user.IsGlobalAdmin || department.HeadId == userId
+            });
         }
 
         /// <summary>
@@ -174,6 +368,7 @@ namespace CorpMsg.Controllers
                 Name = department.Name,
                 HeadId = department.HeadId,
                 HeadName = department.Head?.FullName,
+                AllowRegularUsersToCreateChats = department.AllowRegularUsersToCreateChats,
                 Employees = department.Employees
                     .Where(e => !e.IsFrozen)
                     .Select(e => new UserResponse
@@ -215,9 +410,29 @@ namespace CorpMsg.Controllers
         }
     }
 
+    public class UpdateDepartmentRequest
+    {
+        public string Name { get; set; } = string.Empty;
+        public bool? AllowRegularUsersToCreateChats { get; set; }
+    }
+
     public class CreateDepartmentRequest
     {
         public string Name { get; set; } = string.Empty;
+        public bool AllowRegularUsersToCreateChats { get; set; } = true;
+    } 
+
+    public class UpdateDepartmentSettingsRequest
+    {
+        public bool AllowRegularUsersToCreateChats { get; set; }
+    }
+
+    public class DepartmentSettingsResponse
+    {
+        public Guid DepartmentId { get; set; }
+        public string DepartmentName { get; set; } = string.Empty;
+        public bool AllowRegularUsersToCreateChats { get; set; }
+        public bool CanCurrentUserChange { get; set; }
     }
 
     public class SetHeadRequest
@@ -233,6 +448,7 @@ namespace CorpMsg.Controllers
         public string? HeadName { get; set; }
         public int EmployeeCount { get; set; }
         public Guid? SystemChatId { get; set; }
+        public bool AllowRegularUsersToCreateChats { get; set; } = true;
     }
 
     public class DepartmentDetailResponse : DepartmentResponse

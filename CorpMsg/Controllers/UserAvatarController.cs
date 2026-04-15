@@ -93,7 +93,36 @@ namespace CorpMsg.Controllers
             if (user == null || string.IsNullOrEmpty(user.AvatarUrl))
                 return NotFound("Аватар не установлен");
 
-            return Ok(new { avatarUrl = user.AvatarUrl });
+            // Извлекаем objectName из сохраненного URL
+            var objectName = ExtractObjectName(user.AvatarUrl);
+
+            // Генерируем временную ссылку (действительна 7 дней для аватаров)
+            var presignedUrl = await _fileStorageService.GeneratePresignedUrlAsync(objectName, TimeSpan.FromDays(7));
+
+            return Ok(new { avatarUrl = presignedUrl });
+        }
+
+        private string ExtractObjectName(string fileUrl)
+        {
+            if (string.IsNullOrEmpty(fileUrl))
+                return string.Empty;
+
+            // Если URL содержит параметр fileUrl
+            if (fileUrl.Contains("?fileUrl="))
+            {
+                var encoded = fileUrl.Split("?fileUrl=")[1];
+                return Uri.UnescapeDataString(encoded);
+            }
+
+            // Если это прямой путь
+            if (fileUrl.Contains("/api/file/download?"))
+            {
+                var encoded = fileUrl.Split("?fileUrl=")[1];
+                return Uri.UnescapeDataString(encoded);
+            }
+
+            // Если уже objectName
+            return fileUrl;
         }
 
         private Guid GetCurrentUserId()

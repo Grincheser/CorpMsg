@@ -284,28 +284,31 @@ namespace CorpMsg.Service
             }
         }
 
-        public async Task<string> GeneratePresignedUrlAsync(string fileUrl, TimeSpan expiry)
+        public async Task<string> GeneratePresignedUrlAsync(string objectName, TimeSpan expiry)
         {
             try
             {
                 await EnsureInitializedAsync();
 
-                var objectName = fileUrl.Contains("?")
-                    ? Uri.UnescapeDataString(fileUrl.Split('?')[0].Split("fileUrl=").Last())
-                    : fileUrl.Replace($"{_publicUrl}/api/file/download?fileUrl=", "");
+                _logger.LogInformation($"Generating presigned URL for {objectName}, expires in {expiry.TotalHours}h");
 
+                // Не заменяйте endpoint в URL! MinIO сам генерирует правильный URL
+                // Просто верните то, что сгенерировал MinIO
                 var presignedUrl = await _minioClient.PresignedGetObjectAsync(
                     new PresignedGetObjectArgs()
                         .WithBucket(_bucketName)
                         .WithObject(objectName)
                         .WithExpiry((int)expiry.TotalSeconds));
 
+                _logger.LogInformation($"Generated presigned URL (first 200 chars): {presignedUrl.Substring(0, Math.Min(200, presignedUrl.Length))}");
+
+                // Возвращаем URL как есть, без замены
                 return presignedUrl;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error generating presigned URL");
-                return fileUrl;
+                _logger.LogError(ex, $"Error generating presigned URL for {objectName}");
+                throw;
             }
         }
 

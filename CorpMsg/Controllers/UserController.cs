@@ -63,11 +63,13 @@ namespace CorpMsg.Controllers
 
             if (systemChat != null)
             {
+                var isHead = department.HeadId == user.Id;
+
                 _context.ChatMembers.Add(new ChatMember
                 {
                     ChatId = systemChat.Id,
                     UserId = user.Id,
-                    Role = ChatMemberRole.Member,
+                    Role = isHead ? ChatMemberRole.Head : ChatMemberRole.Member,
                     JoinedAt = DateTime.UtcNow
                 });
             }
@@ -345,6 +347,70 @@ namespace CorpMsg.Controllers
                 IsOnline = user.Status?.IsOnline ?? false,
                 LastSeenAt = user.Status?.LastSeenAt
             };
+        }
+
+        /// <summary>
+        /// Удаление сотрудника (только глобальный администратор)
+        /// </summary>
+        [HttpDelete("{id}")]
+        [Authorize(Roles = "GlobalAdmin")]
+        public async Task<IActionResult> DeleteUser(Guid id)
+        {
+            var currentUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
+            var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
+
+            // Нельзя удалить самого себя
+            if (currentUserId == id)
+                return BadRequest("Нельзя удалить свой собственный аккаунт");
+
+            var user = await _context.Users
+                .FirstOrDefaultAsync(u => u.Id == id && u.CompanyId == companyId && !u.IsDeleted);
+
+            if (user == null)
+                return NotFound("Пользователь не найден");
+
+            // Проверка, является ли пользователь руководителем отдела
+            var isDepartmentHead = await _context.Departments
+                .AnyAsync(d => d.HeadId == id && !d.IsDeleted);
+
+            if (isDepartmentHead)
+            {
+                return BadRequest("Нельзя удалить руководителя отдела. Сначала назначьте нового руководителя.");
+            }
+
+            // Сохраняем информацию для лога
+            var userInfo = new { user.FullName, user.Username, user.Position };
+
+            // Мягкое удаление
+            user.IsDeleted = true;
+            user.DeletedAt = DateTime.UtcNow;
+            user.DeletedByUserId = currentUserId;
+            user.IsFrozen = true;
+            user.Username = $"deleted_{user.Id}";
+            user.FullName = "Пользователь удален";
+            user.Position = null;
+            user.AvatarUrl = null;
+
+            await _context.SaveChangesAsync();
+
+            // Логируем удаление
+            _context.AuditLogs.Add(new AuditLog
+            {
+                UserId = currentUserId,
+                CompanyId = companyId,
+                Action = AuditAction.Delete,
+                EntityType = "User",
+                EntityId = user.Id.ToString(),
+                OldValue = JsonSerializer.Serialize(userInfo),
+                NewValue = JsonSerializer.Serialize(new { Deleted = true })
+            });
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = "Пользователь успешно удален",
+                userId = id
+            });
         }
     }
 

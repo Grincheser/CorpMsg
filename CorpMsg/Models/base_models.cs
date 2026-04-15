@@ -26,7 +26,8 @@ namespace CorpMsg.Models
         AddedToChat = 1,
         AddedToDepartment = 2,
         UserFrozen = 3,
-        System = 4
+        System = 4,
+        RoleChanged = 5
     }
 
     public enum AuditAction
@@ -91,6 +92,10 @@ namespace CorpMsg.Models
 
         public bool IsFrozen { get; set; } = false; // Заморозка аккаунта (декрет, увольнение)
 
+        public bool IsDeleted { get; set; } = false;
+        public DateTime? DeletedAt { get; set; }
+        public Guid? DeletedByUserId { get; set; }
+
         // Компания пользователя
         [MaxLength(500)]
         public string? AvatarUrl { get; set; }
@@ -130,6 +135,8 @@ namespace CorpMsg.Models
         public Guid? HeadId { get; set; }
         [ForeignKey(nameof(HeadId))]
         public User? Head { get; set; }
+
+        public bool AllowRegularUsersToCreateChats { get; set; } = true; // По умолчанию true
 
         // Компания-владелец отдела
         [Required]
@@ -259,8 +266,7 @@ namespace CorpMsg.Models
 
         public long? MediaFileSize { get; set; } // Размер файла в байтах
 
-        [MaxLength(100)]
-        public string? MediaContentType { get; set; } // MIME тип файла
+        public bool IsMedia { get; set; } = false;
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
@@ -283,6 +289,10 @@ namespace CorpMsg.Models
         public Guid? ForwardedFromMessageId { get; set; }
         [ForeignKey(nameof(ForwardedFromMessageId))]
         public Message? ForwardedFrom { get; set; }
+
+        public Guid? ReplyToMessageId { get; set; }
+        [ForeignKey(nameof(ReplyToMessageId))]
+        public Message? ReplyToMessage { get; set; }
     }
 
     /// <summary>
