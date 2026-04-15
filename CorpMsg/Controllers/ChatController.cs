@@ -455,11 +455,26 @@ namespace CorpMsg.Controllers
         {
             var user = await _context.Users.FindAsync(userId);
 
+            if (user == null) return false;
+
+            // Глобальный администратор может всегда
             if (user.IsGlobalAdmin)
                 return true;
 
+            // Руководитель отдела может всегда
             if (await IsDepartmentHead(userId, departmentId))
                 return true;
+
+            // Получаем отдел и проверяем настройки
+            var department = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == departmentId && !d.IsDeleted);
+
+            if (department == null)
+                return false;
+
+            // Проверяем, разрешено ли обычным сотрудникам создавать чаты
+            if (!department.AllowRegularUsersToCreateChats)
+                return false;
 
             // Обычные сотрудники могут создавать только внутриотдельные чаты
             return user.DepartmentId == departmentId;

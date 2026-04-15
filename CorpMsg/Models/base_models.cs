@@ -136,6 +136,8 @@ namespace CorpMsg.Models
         [ForeignKey(nameof(HeadId))]
         public User? Head { get; set; }
 
+        public bool AllowRegularUsersToCreateChats { get; set; } = true; // По умолчанию true
+
         // Компания-владелец отдела
         [Required]
         public Guid CompanyId { get; set; }

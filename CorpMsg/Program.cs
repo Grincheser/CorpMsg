@@ -55,8 +55,8 @@ builder.Services.AddSignalR(options =>
 {
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
     options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-    options.MaximumReceiveMessageSize = 102400; // 100KB
-    options.EnableDetailedErrors = true; // Для отладки
+    options.MaximumReceiveMessageSize = 102400;
+    options.EnableDetailedErrors = true;
 });
 
 // Настройка CORS 
@@ -70,10 +70,10 @@ builder.Services.AddCors(options =>
                 "http://localhost:5173",
                 "http://127.0.0.1:3000",
                 "http://127.0.0.1:5173",
-                "https://localhost:3000",    // Добавить
-                "https://localhost:5173",    // Добавить
-                "https://127.0.0.1:3000",    // Добавить
-                "https://127.0.0.1:5173",    // Добавить
+                "https://localhost:3000",
+                "https://localhost:5173",
+                "https://127.0.0.1:3000",
+                "https://127.0.0.1:5173",
                 "https://ravenapp.ru",
                 "https://www.ravenapp.ru"
             )
@@ -88,14 +88,12 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Настройка JWT аутентификации
-// Добавить проверку до использования
 var jwtKey = builder.Configuration["Jwt:Key"]
     ?? throw new InvalidOperationException("Jwt:Key is not configured in appsettings.json");
 
 if (jwtKey.Length < 32)
-throw new InvalidOperationException("Jwt:Key must be at least 32 characters long");
+    throw new InvalidOperationException("Jwt:Key must be at least 32 characters long");
 
-// Использовать проверенный ключ
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -171,7 +169,62 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
-// Настройка pipeline
+// ==========================================
+// ПРАВИЛЬНЫЙ ПОРЯДОК MIDDLEWARE
+// ==========================================
+
+// 1. СНАЧАЛА: Обработка OPTIONS запросов (preflight) ДО CORS
+app.Use(async (context, next) =>
+{
+    if (context.Request.Method == "OPTIONS")
+    {
+        context.Response.StatusCode = 200;
+        var origin = context.Request.Headers["Origin"].ToString();
+        if (!string.IsNullOrEmpty(origin))
+        {
+            context.Response.Headers.Add("Access-Control-Allow-Origin", origin);
+        }
+        context.Response.Headers.Add("Access-Control-Allow-Credentials", "true");
+        context.Response.Headers.Add("Access-Control-Allow-Methods",
+            "GET, POST, PUT, DELETE, OPTIONS");
+        context.Response.Headers.Add("Access-Control-Allow-Headers",
+            "Authorization, Content-Type, X-Requested-With");
+        await context.Response.CompleteAsync();
+        return;
+    }
+    await next();
+});
+
+// 2. Security Headers (кроме CSP для SignalR)
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+
+    // Пропускаем SignalR хабы, чтобы не ломать WebSockets
+    if (!path.StartsWithSegments("/hubs"))
+    {
+        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
+        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+        context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+
+        // CSP только для продакшена
+        if (!app.Environment.IsDevelopment())
+        {
+            context.Response.Headers.Add("Content-Security-Policy",
+                "default-src 'self'; " +
+                "connect-src 'self' ws: wss:; " +
+                "img-src 'self' data: https://ravenapp.ru; " +
+                "media-src 'self' https://ravenapp.ru; " +
+                "script-src 'self' 'unsafe-inline'; " +
+                "style-src 'self' 'unsafe-inline';");
+        }
+    }
+
+    await next();
+});
+
+// 3. Swagger (может быть до или после, не важно)
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -183,71 +236,33 @@ if (app.Environment.IsDevelopment())
 }
 else
 {
-    // В продакшене тоже включаем Swagger для API документации (опционально)
-    app.UseSwagger();
-    app.UseSwaggerUI(c =>
-    {
-        c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
-        c.RoutePrefix = "swagger";
-    });
+    // Опционально: Swagger в продакшене (лучше отключить или защитить)
+    // app.UseSwagger();
+    // app.UseSwaggerUI(c =>
+    // {
+    //     c.SwaggerEndpoint("/swagger/v1/swagger.json", "CorpMsg API V1");
+    //     c.RoutePrefix = "swagger";
+    // });
 }
 
+// 4. HTTPS редирект
 app.UseHttpsRedirection();
 
-// ВАЖНО: CORS должен быть между UseHttpsRedirection и UseAuthentication
+// 5. CORS - ТЕПЕРЬ ПОСЛЕ ОБРАБОТКИ OPTIONS
 app.UseCors("AllowAll");
 
+// 6. Аутентификация и авторизация
 app.UseAuthentication();
 app.UseAuthorization();
 
+// 7. Rate limiting
 app.UseRateLimiter();
 
-// Настройка Security Headers
-app.Use(async (context, next) =>
-{
-    if (context.Request.Method == "OPTIONS")
-    {
-        context.Response.StatusCode = 200;
-        context.Response.Headers.Add("Access-Control-Allow-Origin", context.Request.Headers["Origin"]);
-        context.Response.Headers.Add("Access-Control-Allow-Credentials", "true");
-        context.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-        context.Response.Headers.Add("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With");
-        await context.Response.CompleteAsync();
-        return;
-    }
-    await next();
-});
-
-// Настройка Security Headers
-app.Use(async (context, next) =>
-{
-    // Пропускаем SignalR эндпоинты для заголовков безопасности
-    var path = context.Request.Path;
-    if (!path.StartsWithSegments("/hubs"))
-    {
-        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-        context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
-        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
-        context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
-
-        // CSP для продакшена
-        if (!app.Environment.IsDevelopment())
-        {
-            context.Response.Headers.Add("Content-Security-Policy",
-            "default-src 'self'; " +
-            "connect-src 'self' ws: wss:; " +
-            "img-src 'self' data: https://ravenapp.ru; " +
-            "media-src 'self' https://ravenapp.ru; " +
-            "script-src 'self' 'unsafe-inline'; " +
-            "style-src 'self' 'unsafe-inline';");
-        }
-    }
-    await next();
-});
+// 8. Маршрутизация
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 
-// Автоматическая миграция при запуске
+// 9. Автоматическая миграция при запуске
 using (var scope = app.Services.CreateScope())
 {
     try
