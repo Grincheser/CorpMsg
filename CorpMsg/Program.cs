@@ -64,22 +64,16 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
     {
-        policy
-            .WithOrigins(
-                "http://localhost:3000",
-                "http://localhost:5173",
-                "http://127.0.0.1:3000",
-                "http://127.0.0.1:5173",
-                "https://localhost:3000",
-                "https://localhost:5173",
-                "https://127.0.0.1:3000",
-                "https://127.0.0.1:5173",
-                "https://ravenapp.ru",
-                "https://www.ravenapp.ru"
-            )
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
+        policy.AllowAnyHeader()
+              .AllowAnyMethod()
+              .SetIsOriginAllowed(_ => true)
+                   .WithOrigins(
+                  "http://localhost:3000",
+                  "http://127.0.0.1:5500",
+                  "https://ravenapp.ru",
+                  "http://ravenapp.ru"
+              )
+              .AllowCredentials();
     });
 });
 
@@ -151,21 +145,7 @@ builder.Services.AddScoped<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddScoped<IBannedWordsService, BannedWordsService>();
 builder.Services.AddScoped<IFileStorageService, FileStorageService>();
 
-// Rate limiting
-builder.Services.AddRateLimiter(options =>
-{
-    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
-        httpContext => RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.User.Identity?.Name ??
-                          httpContext.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
-            factory: partition => new FixedWindowRateLimiterOptions
-            {
-                AutoReplenishment = true,
-                PermitLimit = 100,
-                QueueLimit = 0,
-                Window = TimeSpan.FromMinutes(1)
-            }));
-});
+
 
 var app = builder.Build();
 
@@ -174,55 +154,10 @@ var app = builder.Build();
 // ==========================================
 
 // 1. СНАЧАЛА: Обработка OPTIONS запросов (preflight) ДО CORS
-app.Use(async (context, next) =>
-{
-    if (context.Request.Method == "OPTIONS")
-    {
-        context.Response.StatusCode = 200;
-        var origin = context.Request.Headers["Origin"].ToString();
-        if (!string.IsNullOrEmpty(origin))
-        {
-            context.Response.Headers.Add("Access-Control-Allow-Origin", origin);
-        }
-        context.Response.Headers.Add("Access-Control-Allow-Credentials", "true");
-        context.Response.Headers.Add("Access-Control-Allow-Methods",
-            "GET, POST, PUT, DELETE, OPTIONS");
-        context.Response.Headers.Add("Access-Control-Allow-Headers",
-            "Authorization, Content-Type, X-Requested-With");
-        await context.Response.CompleteAsync();
-        return;
-    }
-    await next();
-});
+
 
 // 2. Security Headers (кроме CSP для SignalR)
-app.Use(async (context, next) =>
-{
-    var path = context.Request.Path;
 
-    // Пропускаем SignalR хабы, чтобы не ломать WebSockets
-    if (!path.StartsWithSegments("/hubs"))
-    {
-        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-        context.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
-        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
-        context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
-
-        // CSP только для продакшена
-        if (!app.Environment.IsDevelopment())
-        {
-            context.Response.Headers.Add("Content-Security-Policy",
-                "default-src 'self'; " +
-                "connect-src 'self' ws: wss:; " +
-                "img-src 'self' data: https://ravenapp.ru; " +
-                "media-src 'self' https://ravenapp.ru; " +
-                "script-src 'self' 'unsafe-inline'; " +
-                "style-src 'self' 'unsafe-inline';");
-        }
-    }
-
-    await next();
-});
 
 // 3. Swagger (может быть до или после, не важно)
 if (app.Environment.IsDevelopment())
@@ -246,9 +181,9 @@ else
 }
 
 // 4. HTTPS редирект
-app.UseHttpsRedirection();
 
-// 5. CORS - ТЕПЕРЬ ПОСЛЕ ОБРАБОТКИ OPTIONS
+
+// 5. CORS - ТЕПЕРЬ ПОСЛЕ ОБРАБОТКИOPTIONS
 app.UseCors("AllowAll");
 
 // 6. Аутентификация и авторизация
@@ -256,7 +191,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // 7. Rate limiting
-app.UseRateLimiter();
 
 // 8. Маршрутизация
 app.MapControllers();

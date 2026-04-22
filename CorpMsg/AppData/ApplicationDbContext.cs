@@ -168,10 +168,10 @@ namespace CorpMsg.AppData
                 .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<Department>()
-                .HasOne(d => d.Head)
-                .WithOne()
-                .HasForeignKey<Department>(d => d.HeadId)
-                .OnDelete(DeleteBehavior.Restrict);
+            .HasOne(d => d.Head)
+            .WithMany(u => u.DepartmentsWhereHead)  
+            .HasForeignKey(d => d.HeadId)
+            .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<Department>()
                 .HasOne(d => d.Company)

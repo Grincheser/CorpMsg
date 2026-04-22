@@ -118,6 +118,7 @@ namespace CorpMsg.Models
         public ICollection<Notification> Notifications { get; set; } = new List<Notification>();
         public ICollection<AuditLog> AuditLogs { get; set; } = new List<AuditLog>();
         public UserStatus? Status { get; set; }
+        public virtual ICollection<Department> DepartmentsWhereHead { get; set; } = new List<Department>();
     }
 
     /// <summary>
