@@ -64,10 +64,6 @@ services:
     environment:
       MINIO_ROOT_USER: Grinch
       MINIO_ROOT_PASSWORD: ravenruslan230
-      MINIO_DOMAIN: localhost  # Добавьте это
-      MINIO_SERVER_URL: http://localhost:9000  # Добавьте это
-      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001 
-      MINIO_REGION: us-east-1
     ports:
       - "9000:9000"   # API порт
       - "9001:9001"   # Web консоль

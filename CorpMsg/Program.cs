@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Minio;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 
@@ -77,6 +78,8 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
+
 // Настройка PostgreSQL
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
@@ -126,17 +129,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddSingleton<IMinioClient>(sp =>
 {
     var configuration = sp.GetRequiredService<IConfiguration>();
-    var endpoint = configuration["Minio:Endpoint"] ?? "localhost:9000";
-    var accessKey = configuration["Minio:AccessKey"] ?? "minioadmin";
-    var secretKey = configuration["Minio:SecretKey"] ?? "minioadmin";
+    var endpoint = configuration["Minio:Endpoint"] ?? "127.0.0.1:9000";
+    var accessKey = configuration["Minio:AccessKey"] ?? "Grinch";
+    var secretKey = configuration["Minio:SecretKey"] ?? "ravenruslan230";
     var useSsl = bool.Parse(configuration["Minio:UseSsl"] ?? "false");
-    var region = configuration["Minio:Region"] ?? "us-east-1";
 
     return new MinioClient()
         .WithEndpoint(endpoint)
         .WithCredentials(accessKey, secretKey)
         .WithSSL(useSsl)
-        .WithRegion(region)
         .Build();
 });
 

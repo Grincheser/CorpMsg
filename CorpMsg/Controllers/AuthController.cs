@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -30,6 +31,16 @@ namespace CorpMsg.Controllers
             _passwordHasher = passwordHasher;
         }
 
+        /// </summary>
+        [HttpPost("key")]
+        public string Genkey()
+        {
+            var key = RandomNumberGenerator.GetBytes(32);
+            var iv = RandomNumberGenerator.GetBytes(16);
+            return $"Key: {Convert.ToBase64String(key)}" +
+                $"IV: {Convert.ToBase64String(iv)}";
+
+        }
         /// <summary>
         /// Регистрация новой компании (шаг 1-3 из ТЗ)
         /// </summary>

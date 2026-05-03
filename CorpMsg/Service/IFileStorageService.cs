@@ -36,7 +36,7 @@ namespace CorpMsg.Service
         private readonly string _publicUrl;
         private readonly SemaphoreSlim _initLock = new(1, 1);
         private bool _isInitialized;
-
+        private readonly string _minioPublicEndpoint;
         public FileStorageService(
             IMinioClient minioClient,
             ApplicationDbContext context,
@@ -48,7 +48,9 @@ namespace CorpMsg.Service
             _configuration = configuration;
             _logger = logger;
             _bucketName = configuration["Minio:BucketName"] ?? "corpmsg-files";
-            _publicUrl = configuration["PublicUrl"] ?? "http://localhost:8080";
+            _publicUrl = configuration["PublicUrl"] ?? "https://ravenapp.ru";
+            // 👇 Публичный эндпоинт для presigned URL
+            _minioPublicEndpoint = configuration["Minio:PublicEndpoint"] ?? "https://ravenapp.ru/files";
         }
 
         private async Task EnsureInitializedAsync()
@@ -158,7 +160,7 @@ namespace CorpMsg.Service
                     .WithObjectSize(file.Length)
                     .WithContentType(file.ContentType));
 
-                var fileUrl = $"{_publicUrl}/api/file/download?fileUrl={Uri.EscapeDataString(objectName)}";
+                var fileUrl = $"https://ravenapp.ru/files/{_bucketName}/{objectName}";
 
                 return Result<UploadFileResponse>.Success(new UploadFileResponse
                 {
@@ -286,31 +288,10 @@ namespace CorpMsg.Service
 
         public async Task<string> GeneratePresignedUrlAsync(string objectName, TimeSpan expiry)
         {
-            try
-            {
-                await EnsureInitializedAsync();
-
-                _logger.LogInformation($"Generating presigned URL for {objectName}, expires in {expiry.TotalHours}h");
-
-                // Не заменяйте endpoint в URL! MinIO сам генерирует правильный URL
-                // Просто верните то, что сгенерировал MinIO
-                var presignedUrl = await _minioClient.PresignedGetObjectAsync(
-                    new PresignedGetObjectArgs()
-                        .WithBucket(_bucketName)
-                        .WithObject(objectName)
-                        .WithExpiry((int)expiry.TotalSeconds));
-
-                _logger.LogInformation($"Generated presigned URL (first 200 chars): {presignedUrl.Substring(0, Math.Min(200, presignedUrl.Length))}");
-
-                // Возвращаем URL как есть, без замены
-                return presignedUrl;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Error generating presigned URL for {objectName}");
-                throw;
-            }
+            // 👇 ПРОСТО ВОЗВРАЩАЕМ ПУБЛИЧНЫЙ URL, без подписи
+            return $"https://ravenapp.ru/files/{_bucketName}/{objectName}";
         }
+
 
         public async Task<string> GetSafeImageUrlAsync(string fileUrl, string imageType)
         {

@@ -291,6 +291,37 @@ namespace CorpMsg.Controllers
                 BannedWordsCount = bannedWordsCount
             });
         }
+        /// <summary>
+        /// Получение списка замороженных пользователей компании
+        /// </summary>
+        [HttpGet("frozen-users")]
+        public async Task<ActionResult<List<UserResponse>>> GetFrozenUsers()
+        {
+            var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
+
+            var frozenUsers = await _context.Users
+                .Include(u => u.Department)
+                .Include(u => u.Status)
+                .Where(u => u.CompanyId == companyId
+                            && u.IsFrozen
+                            && !u.IsDeleted)
+                .OrderBy(u => u.FullName)
+                .ToListAsync();
+
+            return Ok(frozenUsers.Select(u => new UserResponse
+            {
+                Id = u.Id,
+                FullName = u.FullName,
+                Username = u.Username,
+                Position = u.Position,
+                DepartmentId = u.DepartmentId,
+                DepartmentName = u.Department?.Name,
+                IsGlobalAdmin = u.IsGlobalAdmin,
+                IsFrozen = u.IsFrozen,
+                IsOnline = u.Status?.IsOnline ?? false,
+                LastSeenAt = u.Status?.LastSeenAt
+            }));
+        }
 
         /// <summary>
         /// Получение логов аудита

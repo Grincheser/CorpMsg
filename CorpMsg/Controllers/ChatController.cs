@@ -27,17 +27,57 @@ namespace CorpMsg.Controllers
         {
             var currentUserId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier));
             var companyId = Guid.Parse(User.FindFirstValue("CompanyId"));
+            var isGlobalAdmin = User.IsInRole("GlobalAdmin");
 
-            // Проверка прав на создание чата
-            if (!await CanCreateChat(currentUserId, request.DepartmentId))
-                return Forbid();
+            Guid departmentId;
 
-            // Проверяем существование отдела
-            var department = await _context.Departments
-                .FirstOrDefaultAsync(d => d.Id == request.DepartmentId &&
+            // 1. Если админ и не указал DepartmentId - ошибка
+            if (isGlobalAdmin && !request.DepartmentId.HasValue)
+            {
+                return BadRequest("Глобальный администратор должен указать DepartmentId");
+            }
+
+            // 2. Если DepartmentId указан - проверяем его
+            if (request.DepartmentId.HasValue)
+            {
+                departmentId = request.DepartmentId.Value;
+
+                var department = await _context.Departments
+                    .FirstOrDefaultAsync(d => d.Id == departmentId &&
+                        d.CompanyId == companyId && !d.IsDeleted);
+
+                if (department == null)
+                    return BadRequest("Указанный отдел не найден");
+
+                // Проверяем, что пользователь имеет право создавать чат в этом отделе
+                if (!await CanCreateChatInDepartment(currentUserId, departmentId))
+                    return Forbid("У вас нет прав на создание чата в этом отделе");
+            }
+            else
+            {
+                // 3. Если DepartmentId не указан - определяем по пользователю
+                var user = await _context.Users
+                    .FirstOrDefaultAsync(u => u.Id == currentUserId);
+
+                if (user == null)
+                    return Unauthorized();
+
+                if (!user.DepartmentId.HasValue)
+                    return BadRequest("У вас нет отдела. Укажите DepartmentId явно.");
+
+                departmentId = user.DepartmentId.Value;
+
+                // Для обычных пользователей проверяем права на создание чата в их отделе
+                if (!await CanCreateChatInDepartment(currentUserId, departmentId))
+                    return Forbid("У вас нет прав на создание чата в вашем отделе");
+            }
+
+            // Проверяем существование отдела (еще раз для безопасности)
+            var targetDepartment = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == departmentId &&
                     d.CompanyId == companyId && !d.IsDeleted);
 
-            if (department == null)
+            if (targetDepartment == null)
                 return BadRequest("Отдел не найден");
 
             using var transaction = await _context.Database.BeginTransactionAsync();
@@ -47,10 +87,10 @@ namespace CorpMsg.Controllers
                 {
                     Name = request.Name,
                     Description = request.Description,
-                    DepartmentId = request.DepartmentId,
+                    DepartmentId = departmentId,
                     CreatedByUserId = currentUserId,
-                    IsUserCreated = !User.IsInRole("GlobalAdmin") &&
-                        !await IsDepartmentHead(currentUserId, request.DepartmentId)
+                    IsUserCreated = !isGlobalAdmin &&
+                        !await IsDepartmentHead(currentUserId, departmentId)
                 };
 
                 _context.Chats.Add(chat);
@@ -72,7 +112,7 @@ namespace CorpMsg.Controllers
                     // Убираем дубликаты и исключаем создателя, если он уже есть в списке
                     var uniqueMemberIds = request.MemberIds
                         .Distinct()
-                        .Where(id => id != currentUserId) // Исключаем создателя
+                        .Where(id => id != currentUserId)
                         .ToList();
 
                     foreach (var memberId in uniqueMemberIds)
@@ -125,7 +165,7 @@ namespace CorpMsg.Controllers
                             .FirstOrDefaultAsync(d => d.Id == deptId &&
                                 d.CompanyId == companyId && !d.IsDeleted);
 
-                        if (dept != null && dept.Id != request.DepartmentId) // Не добавляем основной отдел
+                        if (dept != null && dept.Id != departmentId) // Не добавляем основной отдел
                         {
                             var existingChatDept = await _context.ChatDepartments
                                 .FirstOrDefaultAsync(cd => cd.ChatId == chat.Id && cd.DepartmentId == deptId);
@@ -154,7 +194,6 @@ namespace CorpMsg.Controllers
             catch (DbUpdateException ex)
             {
                 await transaction.RollbackAsync();
-                // Логируем ошибку
                 Console.WriteLine($"Error creating chat: {ex.Message}");
                 return StatusCode(500, "Ошибка при создании чата");
             }
@@ -162,10 +201,36 @@ namespace CorpMsg.Controllers
             {
                 await transaction.RollbackAsync();
                 Console.WriteLine($"Unexpected error: {ex.Message}");
-                throw;
+                return StatusCode(500, "Внутренняя ошибка сервера");
             }
         }
 
+        /// <summary>
+        /// Проверка прав на создание чата в отделе
+        /// </summary>
+        private async Task<bool> CanCreateChatInDepartment(Guid userId, Guid departmentId)
+        {
+            var user = await _context.Users.FindAsync(userId);
+            if (user == null) return false;
+
+            // Глобальный администратор может всегда
+            if (user.IsGlobalAdmin) return true;
+
+            // Руководитель отдела может всегда
+            if (await IsDepartmentHead(userId, departmentId)) return true;
+
+            // Обычный пользователь - проверяем настройки отдела
+            var department = await _context.Departments
+                .FirstOrDefaultAsync(d => d.Id == departmentId && !d.IsDeleted);
+
+            if (department == null) return false;
+
+            // Проверяем, разрешено ли создавать чаты обычным сотрудникам
+            if (!department.AllowRegularUsersToCreateChats) return false;
+
+            // И что пользователь состоит в этом отделе
+            return user.DepartmentId == departmentId;
+        }
 
         /// <summary>
         /// Редактирование чата
@@ -983,7 +1048,7 @@ namespace CorpMsg.Controllers
     {
         public string Name { get; set; } = string.Empty;
         public string? Description { get; set; }
-        public Guid DepartmentId { get; set; }
+        public Guid? DepartmentId { get; set; }
         public List<Guid>? MemberIds { get; set; }
         public List<Guid>? ParticipatingDepartmentIds { get; set; }
     }
